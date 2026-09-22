@@ -84,13 +84,13 @@ ENV DSH_HOME=/root/.dsh
 COPY bin/dsh-session /usr/local/bin/dsh-session
 RUN chmod 0755 /usr/local/bin/dsh-session
 COPY dsh-profile/settings.yaml     /root/.dsh/settings.yaml
-COPY dsh-profile/package.json      /root/.dsh/profiles/dsh-tui/package.json
+COPY dsh-profile/package.json dsh-profile/package-lock.json /root/.dsh/profiles/dsh-tui/
 COPY dsh-profile/cordis.patch.yml  /root/.dsh/profiles/dsh-tui/cordis.patch.yml
 
 # Materialise the profile's bundle tree from its committed manifest, and purge the cache in the same
 # layer. `--omit=dev` is not used here: the bundles are the runtime, not build-time tooling.
 RUN cd /root/.dsh/profiles/dsh-tui \
- && npm install --no-audit --no-fund \
+ && npm ci --no-audit --no-fund \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
