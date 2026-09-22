@@ -35,6 +35,27 @@ fi
 
 # 3. The harness browser UI, on the tailnet address ONLY. Bound to the tailnet IP rather than
 #    0.0.0.0, so it is unreachable from the public internet by construction, not by policy.
+# Seed a minimal harness home if the workspace has none: the web profile composes its config
+# under ~/.dsh, so a container without it exits immediately and says nothing useful.
+mkdir -p "${DSH_HOME:-/root/.dsh}/profiles/web"
+if [ ! -f "${DSH_HOME:-/root/.dsh}/settings.yaml" ]; then
+    printf 'version: 1\n' > "${DSH_HOME:-/root/.dsh}/settings.yaml"
+fi
+
 echo "starting dsh web on ${TAILNET_IP}:${WEB_PORT}"
-exec dsh --profile web --host "$TAILNET_IP" --port "$WEB_PORT" --no-open \
-         --trusted-host "$WEB_HOSTNAME" --trusted-host "${TAILNET_IP}:${WEB_PORT}"
+# Run it in the background rather than exec: if the interface fails to start we want the health
+# endpoint and the container to stay up, with the reason on stdout. A container that dies on one
+# component's failure cannot be diagnosed from the outside.
+dsh --profile web --host "$TAILNET_IP" --port "$WEB_PORT" --no-open \
+    --trusted-host "$WEB_HOSTNAME" --trusted-host "${TAILNET_IP}:${WEB_PORT}" \
+    > /tmp/dsh-web.log 2>&1 &
+WEB_PID=$!
+sleep 20
+if kill -0 "$WEB_PID" 2>/dev/null; then
+    echo "dsh web is up on ${TAILNET_IP}:${WEB_PORT}"
+else
+    echo "dsh web failed to start; last output:"
+    tail -25 /tmp/dsh-web.log 2>/dev/null || true
+fi
+echo "workspace alive; health endpoint answering"
+exec tail -f /dev/null
