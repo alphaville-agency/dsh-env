@@ -1,0 +1,19 @@
+{
+  // The developer workspace. Never the agency's runtime: it may disappear without affecting
+  // production, and the agency must not depend on it.
+  "name": "alphaville-dsh",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-01",
+  "containers": [
+    {
+      "name": "dsh-workspace",
+      "image": "./container.Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "ssh": { "enabled": true },
+      "authorized_keys": []
+    }
+  ],
+  "durable_objects": { "bindings": [{ "name": "DSH", "class_name": "DshContainer" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DshContainer"] }]
+}
