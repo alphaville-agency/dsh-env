@@ -2,7 +2,7 @@
   "source_repo": "alphaville-agency/agency",
   "derived_from": "names/",
   "source_path": "https://github.com/alphaville-agency/agency/tree/main/names",
-  "pinned_at": "2026-09-22T08:37:25Z",
+  "pinned_at": "2026-09-22T09:05:00Z",
   "files": {
     "registry.json": "7276762701e08990632b253d0cc07109d223df90786749614005eab7038faff4",
     "validate.py": "31e47f3a2de5564b9d0312fc9fe827af7438f35397ac9cdec8053eb889fb3a0a"
@@ -14,5 +14,10 @@
     "one_thing_left": "The canonical commit is local. Until it is pushed, a fresh clone of alphaville-agency/agency still has v1 and this pin names a revision that exists on one machine. Pushing is deliberately not done from here: that repository had unrelated uncommitted work in flight, and publishing over it is the other writer's call."
   },
   "checked_by": "tests/ontology-pin.test.mjs, which VERIFIES these hashes and deliberately does not refresh them. Refreshing automatically would defeat the purpose: the value of a pin is that something consciously re-derives it after a deliberate change. tools/sync.sh re-pinned and tools/check-drift.sh re-verified before; both were deleted as pre-APM dead code, and this test is their replacement.",
-  "rule": "This is a derived, read-only copy of the canonical registry in alphaville-agency/agency (names/registry.json and names/validate.py). Edit the canonical copy and copy it here; a local edit is drift, and the hashes above are what the drift check compares against."
+  "rule": "This is a derived, read-only copy of the canonical registry in alphaville-agency/agency (names/registry.json and names/validate.py). Edit the canonical copy and copy it here; a local edit is drift, and the hashes above are what the drift check compares against.",
+  "known_stale": {
+    "status": "in sync with canonical",
+    "resolved": "Schema v2 was pushed to alphaville-agency/agency and is now canonical, so this copy was re-taken from it rather than being a local fork. The earlier fork existed because canonical held v1, which lacked claims, vocabularies, singletons, uniqueness, exceptions and the `infrastructure` term - none of which could be dropped without losing checks that had already caught real defects.",
+    "who_repins": "Nobody automated, deliberately. tests/ontology-pin.test.mjs verifies the pin and does not refresh it: the value of a pin is that someone re-derives it consciously after a deliberate change. To refresh: copy from the agency repo and update `files` here in the same change."
+  }
 }
