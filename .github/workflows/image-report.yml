@@ -1,0 +1,362 @@
+# DIAGNOSTIC ONLY - manual trigger, never on push.
+#
+# The deployed container image measures 2250 MB and Cloudflare rejects it against the 2000 MB
+# limit that comes with the `lite` instance type. The parts that could be measured from a laptop
+# (base image, npm trees, apt toolchain, mise) sum to roughly 1000 MB, so ~1250 MB is unattributed.
+#
+# This lane answers that with real numbers: it builds the same Dockerfile with plain progress
+# output, captures `docker history` per layer, then enters the built image and attributes the
+# CONTENTS with `du` (top-level, two levels deep, and every path named as a suspect).
+#
+# It does not deploy, does not touch deploy.yml, and does not run on push.
+name: image-report
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      IMAGE: dsh-shell:report
+      BASE: docker.io/cloudflare/sandbox:0.12.9
+      OUT: /tmp/image-report
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Free runner disk and record the environment
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/lib/node_modules 2>/dev/null || true
+          docker system prune -af 2>/dev/null || true
+          df -h /
+          docker version 2>&1 | head -20
+          docker buildx version 2>&1 | head -3
+
+      - name: npm ci (wrangler and the repo's own dependencies)
+        run: npm ci --no-audit --no-fund
+
+      - name: Show the build context
+        run: |
+          echo "--- git ---"
+          git rev-parse HEAD
+          git log -1 --format='%H %s'
+          sha256sum container.Dockerfile
+          echo "--- .dockerignore ---"
+          cat .dockerignore 2>&1 || echo "(none: the whole checkout is the context)"
+          echo "--- context size present in CI ---"
+          du -sh --exclude=.git . 2>/dev/null
+          echo "--- COPY sources, PRESENT or MISSING ---"
+          for p in dsh-install/package.json dsh-install/package-lock.json mise.toml \
+                   agent/AGENTS.md agent/MODEL-ROLES.md agent/settings.yaml agent/rules \
+                   agent/skills agent/ontology/registry.json agent/ontology/validate.py \
+                   agent/ontology/PIN.json agent/ontology/README.md agent/profiles; do
+            if [ -e "$p" ]; then printf 'PRESENT  %-45s %s\n' "$p" "$(du -sh "$p" 2>/dev/null | cut -f1)";
+            else printf 'MISSING  %s\n' "$p"; fi
+          done
+          echo "--- node_modules anywhere in the context (expected: none, gitignored) ---"
+          find . -maxdepth 4 -name node_modules -type d 2>/dev/null | head -20 || true
+
+      - name: Build the image with plain progress output
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT"
+          echo "== attempt 1: plain 'docker build --progress=plain -f container.Dockerfile .'" | tee "$OUT/build.log"
+          if docker build --progress=plain -t "$IMAGE" -f container.Dockerfile . 2>&1 | tee -a "$OUT/build.log"; then
+            echo "== RESULT: plain 'docker build -f container.Dockerfile .' SUCCEEDED" | tee -a "$OUT/build.log"
+          else
+            echo "== RESULT: plain 'docker build' FAILED; trying buildx --load fallback" | tee -a "$OUT/build.log"
+            if docker buildx build --progress=plain --load -t "$IMAGE" -f container.Dockerfile . 2>&1 | tee -a "$OUT/build.log"; then
+              echo "== RESULT: 'docker buildx build --load' SUCCEEDED" | tee -a "$OUT/build.log"
+            else
+              echo "== RESULT: buildx --load ALSO FAILED" | tee -a "$OUT/build.log"
+            fi
+          fi
+          echo "--- images after the build ---" | tee -a "$OUT/build.log"
+          docker images 2>&1 | tee -a "$OUT/build.log"
+
+      - name: Write the in-image probe script
+        run: |
+          cat > /tmp/inside.sh <<'INSIDE_EOF'
+          hdr() { printf '\n---------- %s ----------\n' "$1"; }
+
+          hdr "pure top-level directories (du -xhd1 /)"
+          du -xhd1 / 2>/dev/null | sort -rh | head -30
+
+          hdr "two levels deep (du -xhd2 /)"
+          du -xhd2 / 2>/dev/null | sort -rh | head -60
+
+          hdr "largest directories ANYWHERE (cumulative du -x /, top 80)"
+          du -x / 2>/dev/null | sort -rn | head -80 | awk '{printf "%9.1f MB  %s\n", $1/1024, $2}'
+
+          hdr "path probes"
+          probe() {
+            for p in "$@"; do
+              if [ -e "$p" ]; then
+                printf '%-62s %s\n' "$p" "$(du -xsh "$p" 2>/dev/null | cut -f1)"
+              else
+                printf '%-62s ABSENT\n' "$p"
+              fi
+            done
+          }
+          probe /opt /opt/dsh-install /opt/dsh-install/node_modules \
+                /opt/dsh-install/node_modules/@img /opt/dsh-install/node_modules/node-pty \
+                /opt/dsh-install/node_modules/@opentelemetry /opt/dsh-install/node_modules/openai \
+                /opt/dsh-install/node_modules/@google /opt/dsh-install/node_modules/@anthropic-ai \
+                /opt/dsh-install/node_modules/@octokit /opt/dsh-install/node_modules/@deepseek-ai \
+                /usr/local/lib/node_modules /usr/local/bin/dsh /usr/local/bin /usr/local \
+                /usr/lib /usr/share /usr/lib/x86_64-linux-gnu /usr/share/doc \
+                /var /var/lib /var/cache /var/log \
+                /root /root/.dsh /root/.dsh/profiles /root/.agents /root/.local \
+                /root/.local/share /root/.local/share/mise /root/.cache /root/.npm /root/.pnpm-store \
+                /tmp /workspace /mnt /home /srv /etc /bin /sbin /lib
+
+          hdr "what is actually at the top of each of the biggest parents"
+          for d in /opt /usr/local /usr/lib /usr/share /root /root/.local /var /etc; do
+            echo "# $d"
+            du -xhd1 "$d" 2>/dev/null | sort -rh | head -12
+          done
+
+          hdr "dsh profiles: sizes and installed node_modules"
+          for d in /root/.dsh/profiles/*/; do
+            printf '%s total=%s node_modules=%s\n' "$d" \
+              "$(du -xsh "$d" 2>/dev/null | cut -f1)" \
+              "$(du -xsh "$d/node_modules" 2>/dev/null | cut -f1 || echo ABSENT)"
+            ls -1 "$d" 2>/dev/null | tr '\n' ' '; echo
+          done
+
+          hdr "/usr/local/bin/dsh resolution and the toolchain on PATH"
+          ls -la /usr/local/bin/dsh 2>&1
+          readlink -f /usr/local/bin/dsh 2>&1
+          for t in dsh node npm npx pnpm corepack mise python3 pip3 gh git tmux rg jq rclone less make; do
+            printf '%-10s %s\n' "$t" "$(command -v "$t" 2>/dev/null || echo 'NOT ON PATH')"
+          done
+
+          hdr "every platform-binary / native-build directory under /opt and /root"
+          find /opt /root /usr/local/lib -xdev -type d \
+            \( -name '@img' -o -name 'sharp' -o -name 'node-pty' -o -name 'esbuild' \
+               -o -name '@esbuild' -o -name 'prebuilds' -o -name '*-linux-x64*' \
+               -o -name '*-linux-x64-gnu' -o -name '*-linux-arm64*' \) 2>/dev/null \
+            | while read -r d; do printf '%-72s %s\n' "$d" "$(du -xsh "$d" 2>/dev/null | cut -f1)"; done
+
+          hdr "native artefacts: binding.gyp, .node binaries, node-gyp output"
+          find /opt /root /usr/local/lib -xdev \( -name 'binding.gyp' -o -name '*.node' \) 2>/dev/null | head -40
+          echo "# .node binaries by size"
+          find /opt /root /usr/local/lib -xdev -name '*.node' 2>/dev/null \
+            | while read -r f; do printf '%s\t%s\n' "$(du -k "$f" 2>/dev/null | cut -f1)" "$f"; done \
+            | sort -rn | head -20 | awk '{printf "%8.1f MB  %s\n", $1/1024, $2}'
+
+          hdr "@deepseek-ai/dsh tree: the biggest packages inside /opt/dsh-install/node_modules"
+          du -xsh /opt/dsh-install/node_modules/* 2>/dev/null | sort -rh | head -30
+          echo "# scoped packages"
+          du -xsh /opt/dsh-install/node_modules/@*/* 2>/dev/null | sort -rh | head -40
+
+          hdr "npm / pnpm / pip caches after the Dockerfile's in-layer removals"
+          for p in /root/.npm /root/.npm/_cacache /root/.cache /root/.cache/pip /root/.cache/node-gyp \
+                   /root/.pnpm-store /root/.local/share/pnpm /root/.local/share/pnpm-store \
+                   /root/.local/share/mise/downloads /root/.local/share/mise/installs \
+                   /var/lib/apt/lists /var/cache/apt /tmp /root/.npmrc; do
+            if [ -e "$p" ]; then printf 'PRESENT %-55s %s\n' "$p" "$(du -xsh "$p" 2>/dev/null | cut -f1)";
+            else printf 'ABSENT  %s\n' "$p"; fi
+          done
+
+          hdr "dpkg installed-size by package, top 40 (the apt toolchain)"
+          dpkg-query -Wf '${Installed-Size}\t${Package}\n' 2>/dev/null | sort -rn | head -40 \
+            | awk '{printf "%8.1f MB  %s\n", $1/1024, $2}'
+          echo "# total"
+          dpkg-query -Wf '${Installed-Size}\n' 2>/dev/null | awk '{s+=$1} END {printf "%.1f MB across %d packages\n", s/1024, NR}'
+
+          hdr "python3-pip and python3-venv: what they actually pull in"
+          dpkg-query -Wf '${Installed-Size}\t${Package}\n' 2>/dev/null \
+            | grep -E '(python3|pip|setuptools|wheel|venv|distutils|libpython)' \
+            | sort -rn | head -25 | awk '{printf "%8.1f MB  %s\n", $1/1024, $2}'
+          du -xsh /usr/lib/python3 /usr/lib/python3.* /usr/share/python-wheels /usr/share/doc/python3* 2>/dev/null
+
+          hdr "global node modules shipped by the BASE image"
+          ls -la /usr/local/lib/node_modules 2>/dev/null
+          du -xsh /usr/local/lib/node_modules/* 2>/dev/null | sort -rh | head -20
+
+          hdr "mise: what the installer left behind"
+          ls -la /root/.local /root/.local/bin /root/.local/share 2>/dev/null
+          du -xsh /root/.local/* 2>/dev/null | sort -rh
+          ls -la /root/.local/share/mise/installs 2>/dev/null || echo "(no mise installs: mise.toml [tools] is empty)"
+
+          hdr "the agent configuration copied in (instructions, skills, ontology)"
+          du -xsh /root/.dsh /root/.agents 2>/dev/null
+          du -xsh /root/.agents/skills/* 2>/dev/null | sort -rh | head -30
+
+          hdr "largest individual files anywhere (top 30, > 5 MB)"
+          find / -xdev -type f -size +5M 2>/dev/null \
+            | while read -r f; do printf '%s\t%s\n' "$(du -k "$f" 2>/dev/null | cut -f1)" "$f"; done \
+            | sort -rn | head -30 | awk '{printf "%8.1f MB  %s\n", $1/1024, $2}'
+
+          hdr "filesystem totals"
+          df -h /
+          echo "# non-empty writable layers that a running container would still hold:"
+          du -xsh / 2>/dev/null
+          INSIDE_EOF
+          echo "wrote /tmp/inside.sh ($(wc -l < /tmp/inside.sh) lines)"
+
+      - name: Measure the image
+        if: always()
+        continue-on-error: true
+        run: |
+          cat > /tmp/measure.sh <<'MEASURE_EOF'
+          IMAGE="${IMAGE:-dsh-shell:report}"
+          BASE="${BASE:-docker.io/cloudflare/sandbox:0.12.9}"
+          OUT="${OUT:-/tmp/image-report}"
+          mkdir -p "$OUT"
+          hdr() { printf '\n\n==================== %s ====================\n' "$1"; }
+
+          hdr "0. RUNNER ENVIRONMENT"
+          date -u
+          echo "cpus: $(nproc)   memory:"; free -m | head -2
+          df -h / /var/lib/docker 2>/dev/null
+          docker version --format 'docker server {{.Server.Version}}' 2>&1
+          docker buildx version 2>&1 | head -2
+          docker system df 2>&1
+
+          hdr "1. WHAT WAS BUILT"
+          git rev-parse HEAD 2>/dev/null
+          sha256sum container.Dockerfile 2>/dev/null
+          git status --porcelain 2>/dev/null | head
+
+          hdr "2. BUILD LOG (docker build --progress=plain)"
+          cat "$OUT/build.log" 2>&1 || echo "(no build log)"
+
+          hdr "3. IMAGE SIZE (authoritative, uncompressed)"
+          docker images "$IMAGE" --format '{{.Repository}}:{{.Tag}}  {{.Size}}  {{.ID}}' 2>&1
+          docker image inspect "$IMAGE" --format 'Size bytes: {{.Size}}' 2>&1
+          docker image inspect "$IMAGE" --format '{{.Size}}' 2>/dev/null \
+            | awk '{printf "Size: %.1f MiB / %.3f GB\n", $1/1048576, $1/1000000000}'
+
+          hdr "4. DOCKER HISTORY - per-layer, in build order, no truncation"
+          docker history --no-trunc --format '{{.Size}}	{{.CreatedBy}}' "$IMAGE" 2>&1
+
+          hdr "5. DOCKER HISTORY - sorted by layer size, largest first"
+          docker history --no-trunc --format '{{.Size}}|{{.CreatedBy}}' "$IMAGE" 2>/dev/null \
+            | python3 -c '
+          import sys
+          UNITS = {"B":1, "kB":1000, "KB":1000, "MB":1000**2, "GB":1000**3, "TB":1000**4,
+                   "KiB":1024, "MiB":1024**2, "GiB":1024**3, "TiB":1024**4}
+          def to_bytes(text):
+              text = text.strip()
+              if not text:
+                  return 0
+              for unit in ("TiB","GiB","MiB","KiB","TB","GB","MB","kB","KB","B"):
+                  if text.endswith(unit):
+                      try:
+                          return int(float(text[:-len(unit)]) * UNITS[unit])
+                      except ValueError:
+                          return 0
+              try:
+                  return int(float(text))
+              except ValueError:
+                  return 0
+          rows = []
+          for line in sys.stdin:
+              line = line.rstrip("\n")
+              if "|" not in line:
+                  continue
+              size, created = line.split("|", 1)
+              rows.append((to_bytes(size), size.strip(), created))
+          rows.sort(key=lambda row: -row[0])
+          total = 0
+          for size_bytes, size_text, created in rows:
+              total += size_bytes
+              print("%14s B  %9s  %s" % (format(size_bytes, ","), size_text, created[:180]))
+          print("%14s B  SUM OF LAYERS (this should match the image size)" % format(total, ","))
+          print("SUM: %.1f MiB" % (total / 1048576))
+          '
+          echo "# zero-size (metadata-only) layers: $(docker history --format '{{.Size}}' "$IMAGE" 2>/dev/null | grep -c '^0B$')"
+          echo "# layer count: $(docker history -q "$IMAGE" 2>/dev/null | wc -l)"
+
+          hdr "6. BASE IMAGE ALONE (docker.io/cloudflare/sandbox:0.12.9)"
+          docker pull "$BASE" 2>&1 | tail -3
+          docker images "$BASE" --format '{{.Repository}}:{{.Tag}}  {{.Size}}' 2>&1
+          docker image inspect "$BASE" --format '{{.Size}}' 2>/dev/null \
+            | awk '{printf "Base size: %.1f MiB / %.3f GB\n", $1/1048576, $1/1000000000}'
+          echo "# base per-layer history, largest first"
+          docker history --no-trunc --format '{{.Size}}|{{.CreatedBy}}' "$BASE" 2>/dev/null \
+            | python3 -c '
+          import sys
+          UNITS = {"B":1, "kB":1000, "KB":1000, "MB":1000**2, "GB":1000**3, "TB":1000**4,
+                   "KiB":1024, "MiB":1024**2, "GiB":1024**3, "TiB":1024**4}
+          def to_bytes(text):
+              text = text.strip()
+              if not text:
+                  return 0
+              for unit in ("TiB","GiB","MiB","KiB","TB","GB","MB","kB","KB","B"):
+                  if text.endswith(unit):
+                      try:
+                          return int(float(text[:-len(unit)]) * UNITS[unit])
+                      except ValueError:
+                          return 0
+              try:
+                  return int(float(text))
+              except ValueError:
+                  return 0
+          rows = []
+          for line in sys.stdin:
+              line = line.rstrip("\n")
+              if "|" not in line:
+                  continue
+              size, created = line.split("|", 1)
+              rows.append((to_bytes(size), size.strip(), created))
+          rows.sort(key=lambda row: -row[0])
+          total = 0
+          for size_bytes, size_text, created in rows:
+              total += size_bytes
+              print("%14s B  %9s  %s" % (format(size_bytes, ","), size_text, created[:180]))
+          print("BASE SUM: %.1f MiB" % (total / 1048576))
+          '
+          echo "# base filesystem, top-level"
+          docker run --rm -u 0 --entrypoint sh "$BASE" -c 'du -xhd1 / 2>/dev/null | sort -rh | head -25' 2>&1
+
+          hdr "7. FULL IMAGE - root filesystem total (du -xsh /)"
+          docker run --rm -u 0 --entrypoint sh "$IMAGE" -c 'du -xsh / 2>/dev/null' 2>&1
+
+          hdr "8. IN-IMAGE PROBE (du attribution: top-level, depth 2, largest anywhere, every suspect)"
+          docker run --rm -u 0 -i --entrypoint sh "$IMAGE" -s < /tmp/inside.sh 2>&1
+
+          hdr "9. DELETION-VS-LAYER CHECK (does the final rm -rf actually shrink anything?)"
+          echo "# The final RUN that rm -rf's the caches must appear in history as ~0B: the bytes it deletes"
+          echo "# live on in the layers that created them. Compare the history sizes above."
+          MEASURE_EOF
+          bash /tmp/measure.sh 2>&1 | tee "$OUT/report.txt"
+
+      - name: Print the report into the run log
+        if: always()
+        run: |
+          echo "########## FULL REPORT ##########"
+          cat /tmp/image-report/report.txt 2>&1 || echo "(no report produced)"
+          echo "########## END REPORT ##########"
+
+      # The report is kept in /tmp while the build runs, so that a report directory never becomes part
+      # of the Docker build context. It is copied into the workspace only now, after the build.
+      - name: Stage the report for upload
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/_image-report"
+          cp -r /tmp/image-report/. "$GITHUB_WORKSPACE/_image-report/" 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/_image-report"
+
+      - name: Upload the report as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-report
+          path: _image-report/
+          if-no-files-found: warn
+          retention-days: 30
