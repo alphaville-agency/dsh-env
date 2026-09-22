@@ -1,0 +1,29 @@
+# Deploys the Worker and builds the container image on GitHub's runners.
+#
+# GitHub's ubuntu runners have Docker, so the image is built here rather than on anyone's laptop —
+# and `@cloudflare/containers` is installed from package.json by `npm ci`, which is why the local
+# deploy failed to resolve it. Nothing about this repository needs anything installed locally.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --no-audit --no-fund
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
