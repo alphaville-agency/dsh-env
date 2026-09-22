@@ -13,6 +13,8 @@ export class DshShell extends Container<Env> {
   // attached, so it lives while someone works and dies when they stop. Idle costs nothing.
   sleepAfter = "5m";
 
+  // Passed at start rather than baked in: the object-store credentials live as Worker secrets so
+  // the workspace's state can persist without a credential ever entering the repository or image.
   envVars = { WORKER_HEALTH_URL: "https://dsh.alphaville.space/healthz" };
 }
 
@@ -28,7 +30,21 @@ export default {
     // Everything else wakes it and waits for the ports. Accessing the workspace IS the wake-up, so
     // there is no separate step to remember.
     const container = getContainer(env.DSH, "dsh");
-    await container.startAndWaitForPorts({ ports: [8080, 22] });
-    return Response.json({ started: true, instance: "dsh" });
+    await container.startAndWaitForPorts({
+      ports: [8080, 22],
+      startOptions: {
+        envVars: {
+          WORKER_HEALTH_URL: "https://dsh.alphaville.space/healthz",
+          // Worker secrets, passed through at start. Not in this file, not in the image.
+          ...(env.R2_ACCESS_KEY_ID ? {
+            R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
+            R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
+            R2_ENDPOINT: env.R2_ENDPOINT,
+            DSH_STATE_REMOTE: "r2:dsh-state/home",
+          } : {}),
+        },
+      },
+    });
+    return Response.json({ started: true, instance: "dsh", state: env.R2_ACCESS_KEY_ID ? "r2" : "ephemeral" });
   },
 };

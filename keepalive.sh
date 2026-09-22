@@ -28,16 +28,28 @@ HEALTH=$!
 
 # The harness state is what makes this workspace ours rather than a fresh box: sessions, history,
 # config, workspace list. It is small text, so it syncs cheaply to R2 and back.
+# Build the object-store remote from the environment. Credentials arrive as Worker secrets passed at
+# start, never baked into the image or committed - a secret in a repository is the defect this
+# project keeps finding.
+if [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_ENDPOINT:-}" ]; then
+    export RCLONE_CONFIG_R2_TYPE=s3
+    export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+    export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+    export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+    export RCLONE_CONFIG_R2_ENDPOINT="$R2_ENDPOINT"
+    STATE_REMOTE="${STATE_REMOTE:-r2:dsh-state/home}"
+fi
+
 if [ -n "$STATE_REMOTE" ] && command -v rclone >/dev/null 2>&1; then
     echo "restoring state from $STATE_REMOTE"
-    rclone sync "$STATE_REMOTE" /root/.dsh --create-empty-src-dirs --quiet || \
+    rclone sync "$STATE_REMOTE" /root --create-empty-src-dirs --quiet --exclude ".cache/**" --exclude "tmp/**" || \
         echo "state restore failed; starting fresh"
 fi
 
 save_state() {
     [ -n "$STATE_REMOTE" ] || return 0
     command -v rclone >/dev/null 2>&1 || return 0
-    rclone sync /root/.dsh "$STATE_REMOTE" --quiet || echo "state save failed"
+    rclone sync /root "$STATE_REMOTE" --quiet --exclude ".cache/**" --exclude "tmp/**" || echo "state save failed"
 }
 
 terminal_idle_seconds() {
