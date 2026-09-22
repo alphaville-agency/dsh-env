@@ -1,11 +1,11 @@
 {
-  "name": "prod-tooling-dsh-shell",
+  "name": "dev-tooling-dsh-shell",
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-01",
   "containers": [
     {
       "class_name": "DshShell",
-      "name": "prod-tooling-dsh-shell",
+      "name": "dev-tooling-dsh-shell",
       "image": "./container.Dockerfile",
       "instance_type": "lite",
       "max_instances": 1,
@@ -38,7 +38,7 @@
   ],
   "routes": [
     {
-      "pattern": "dsh.alphaville.space",
+      "pattern": "dev-dsh.alphaville.space",
       "custom_domain": true
     }
   ]

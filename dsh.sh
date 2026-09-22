@@ -13,8 +13,8 @@
 # idle workspace costs nothing.
 set -eu
 
-WORKER="${DSH_WORKER:-prod-tooling-dsh-shell}"
-URL="${DSH_WAKE_URL:-https://dsh.alphaville.space}"
+WORKER="${DSH_WORKER:-dev-tooling-dsh-shell}"
+URL="${DSH_WAKE_URL:-https://dev-dsh.alphaville.space}"
 KEY="${DSH_KEY:-$HOME/.ssh/alphaville_dsh}"
 USER_="${DSH_USER:-root}"
 

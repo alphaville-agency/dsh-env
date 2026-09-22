@@ -15,7 +15,7 @@ export class DshShell extends Container<Env> {
 
   // Passed at start rather than baked in: the object-store credentials live as Worker secrets so
   // the workspace's state can persist without a credential ever entering the repository or image.
-  envVars = { WORKER_HEALTH_URL: "https://dsh.alphaville.space/healthz" };
+  envVars = { WORKER_HEALTH_URL: "https://dev-dsh.alphaville.space/healthz" };
 }
 
 export default {
@@ -24,7 +24,7 @@ export default {
 
     // Cheap and offline: does not start the container. Used by the keepalive and by probes.
     if (url.pathname === "/healthz") {
-      return Response.json({ ok: true, service: "prod-tooling-dsh-shell" });
+      return Response.json({ ok: true, service: "dev-tooling-dsh-shell" });
     }
 
     // Everything else wakes it and waits for the ports. Accessing the workspace IS the wake-up, so
@@ -34,13 +34,13 @@ export default {
       ports: [8080, 22],
       startOptions: {
         envVars: {
-          WORKER_HEALTH_URL: "https://dsh.alphaville.space/healthz",
+          WORKER_HEALTH_URL: "https://dev-dsh.alphaville.space/healthz",
           // Worker secrets, passed through at start. Not in this file, not in the image.
           ...(env.R2_ACCESS_KEY_ID ? {
             R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
             R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
             R2_ENDPOINT: env.R2_ENDPOINT,
-            DSH_STATE_REMOTE: "r2:dsh-state/home",
+            DSH_STATE_REMOTE: "r2:af-dev-tooling-dsh/home",
           } : {}),
         },
       },
