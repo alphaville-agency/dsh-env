@@ -17,8 +17,7 @@
           "name": "dsh",
           "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC+FNHSJUqtrnnyea86mdZmXNZJ+c+4LXXtc9ml47eA2 dsh@alphaville.space"
         }
-      ],
-      "sleepAfter": "5m"
+      ]
     }
   ],
   "durable_objects": {
