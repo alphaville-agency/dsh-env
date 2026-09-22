@@ -3,8 +3,10 @@
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git openssh-server tmux python3 python3-venv \
+      nodejs npm \
       jq less ripgrep \
  && curl -fsSL https://tailscale.com/install.sh | sh \
+ && npm install -g @deepseek-ai/dsh \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /work
 COPY . /work
