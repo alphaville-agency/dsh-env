@@ -48,7 +48,21 @@ RUN curl -fsSL https://mise.run | sh
 ENV PATH="/root/.local/bin:/root/.local/share/mise/shims:${PATH}"
 
 # The harness CLI, so the terminal can land straight in the dsh TUI.
-RUN npm install -g @deepseek-ai/dsh
+#
+# Installed from a committed manifest and lockfile rather than `npm install -g
+# @deepseek-ai/dsh`. That form is not merely unpinned, it is currently BROKEN: the latest dsh
+# resolves a transitive @deepseek-ai/dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3, and rc.3
+# was never published, so a fresh install fails with ETARGET no matter which dsh version you ask
+# for. An override pins that one dependency back to the latest version that does exist.
+#
+# This is a workaround for an upstream packaging defect, not a preference. The ceiling is that
+# dsh-install/package.json must be revisited when upstream republishes; the upgrade path is to
+# drop the override, regenerate the lockfile and rebuild. `npm ci` means the tree is identical
+# for every build and the override cannot silently drift.
+COPY dsh-install/package.json dsh-install/package-lock.json /opt/dsh-install/
+RUN cd /opt/dsh-install \
+ && npm ci --no-audit --no-fund \
+ && ln -sf /opt/dsh-install/node_modules/.bin/dsh /usr/local/bin/dsh
 
 RUN mkdir -p /workspace
 WORKDIR /workspace
