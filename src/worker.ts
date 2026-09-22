@@ -33,6 +33,7 @@ import {
   METHOD_FIELD,
   METHOD_GET,
   METHOD_POST,
+  MODEL_KEY_ENV,
   OK_FIELD,
   ROUTES_FIELD,
   ROUTE_FIELD,
@@ -87,6 +88,7 @@ export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
   STATE: R2Bucket;
   [AUTH_TOKEN_ENV]?: string;
+  [MODEL_KEY_ENV]?: string;
 }
 
 /**
@@ -115,6 +117,30 @@ const TERMINAL_SESSION = "dsh";
 
 function sandboxFor(env: Env): Sandbox {
   return getSandbox(env.Sandbox, SANDBOX_ID, SANDBOX_OPTIONS);
+}
+
+/**
+ * Put the model credential into the container's environment, where the harness looks for it.
+ *
+ * This is the join between the two halves of the design. The credential lives in a Worker SECRET -
+ * never in the image, never in this repository, never in the profile's settings, which name the
+ * environment variable rather than carrying its value. `settings.yaml` says
+ * `apiKeyEnv: CHEAPINFERENCE_COM_API_KEY`, so the container has to have that variable set or the
+ * harness starts and then cannot reach a model at all.
+ *
+ * The SDK has no `envVars` option on `getSandbox`; `setEnvVars` is the API, so this runs before each
+ * operation rather than once at construction. That is idempotent and cheap - the SDK stores the
+ * values against the sandbox - and it means a rotated secret takes effect on the next request rather
+ * than on the next container.
+ *
+ * If the secret is absent this does nothing and the environment still works as a shell. Failing the
+ * request instead would trade a usable workspace for a clear error message, which is the wrong way
+ * round: the harness reports its own missing key far better than a 500 from here would.
+ */
+async function injectModelKey(sandbox: Sandbox, env: Env): Promise<void> {
+  const key = env[MODEL_KEY_ENV];
+  if (typeof key !== "string" || key.length === 0) return;
+  await sandbox.setEnvVars({ [MODEL_KEY_ENV]: key });
 }
 
 /**
@@ -164,8 +190,11 @@ async function runCommand(request: Request, env: Env): Promise<Response> {
     );
   }
 
+  const sandbox = sandboxFor(env);
+  await injectModelKey(sandbox, env);
+
   try {
-    const { stdout, stderr, exitCode, success } = await sandboxFor(env).exec(command);
+    const { stdout, stderr, exitCode, success } = await sandbox.exec(command);
     return Response.json({ stdout, stderr, exitCode, success });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -214,7 +243,10 @@ async function terminal(request: Request, env: Env): Promise<Response> {
     : TERMINAL_SHELL_DEFAULT;
 
   // The explicit session is what makes this type-safe; see TERMINAL_SESSION and SANDBOX_OPTIONS.
-  const session = await sandboxFor(env).getSession(TERMINAL_SESSION);
+  const sandbox = sandboxFor(env);
+  await injectModelKey(sandbox, env);
+
+  const session = await sandbox.getSession(TERMINAL_SESSION);
   return await session.terminal(request, { shell });
 }
 

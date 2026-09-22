@@ -93,6 +93,16 @@ export const TERMINAL_SHELL_ALLOWED = ["dsh-session", "bash", "sh"];
  * control that has never been exercised is worse than shipping a token that has been.
  */
 export const AUTH_TOKEN_ENV = "DSH_TOKEN";
+
+/**
+ * The environment variable the harness reads its model credential from.
+ *
+ * The name is not ours to choose: the profile's settings.yaml declares
+ * `apiKeyEnv: CHEAPINFERENCE_COM_API_KEY` for the cheapinference provider, so the container
+ * must carry exactly this variable. It is a Worker SECRET, injected with setEnvVars, and it
+ * never appears in this repository or in the image.
+ */
+export const MODEL_KEY_ENV = "CHEAPINFERENCE_COM_API_KEY";
 export const BEARER_PREFIX = "Bearer ";
 
 /** HTTP methods we dispatch on, and the one WebSocket protocol token we compare. */

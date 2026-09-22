@@ -41,6 +41,11 @@ llm-pi-ai:
           name: gpt-5.6-luna
           contextWindow: 1050000
           maxTokens: 128000
+# ONLY PROVIDER. cheapinference.com is the sole route, and every other provider module is left
+# deliberately empty rather than configured: a second provider that is reachable is a second
+# place a session can spend money and a second thing to keep credentials for. The key is not
+# here - `apiKeyEnv` names the environment variable, and the value arrives at run time from a
+# Worker secret (see src/worker.ts, injectModelKey).
 llm-deepseek:
   models: []
 dsh-tui:
