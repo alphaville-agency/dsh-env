@@ -25,72 +25,83 @@ export const SANDBOX_ID = "dsh";
 /**
  * The cost control. Five minutes after the last request the container stops, and a stopped
  * container costs nothing. Nothing in this repo may extend it from the inside.
+ *
+ * Why five minutes is safe with an interactive terminal, when it is NOT safe with SSH: sleeping is
+ * driven by REQUESTS, and an open WebSocket is a live request stream. A connected terminal
+ * therefore keeps the container up for as long as it is connected, and the five minutes only start
+ * counting once the last client has gone. That is not true of an SSH session, which Cloudflare's own
+ * SSH guide says does not keep a container alive - which is why the terminal lives on the Worker and
+ * not on port 22.
  */
 export const SLEEP_AFTER = "5m";
 
-/** Routes. The floor has two: liveness, and the ability to run a command. */
+/**
+ * Routes.
+ *
+ * `/ws/terminal` is the product: a WebSocket upgrade here is proxied straight to the container PTY
+ * by the SDK, so PTY sizing, output buffering and reconnection are the platform's work and not ours.
+ * CONNECTING IS THE WAKE-UP - the upgrade is a request, so there is no separate start step to
+ * forget, and no `/wake` route is needed. That is the whole reason the terminal is on the Worker
+ * rather than on SSH: `wrangler containers ssh` will not start a stopped container, and wrangler
+ * exposes no `containers start`, so an SSH-only design has no way back in after the container
+ * sleeps.
+ *
+ * `/run` runs one command and returns its buffered output. It stays because it is the verification
+ * path - "does the remote environment work" must be answerable in one command from a laptop - and
+ * because it is the contract every layer above this one was waiting on.
+ *
+ * Both are behind the same bearer check. What used to be here and is NOT coming back: these same
+ * two routes with NO authentication. `POST /run` was measured answering 200 to an anonymous `curl`
+ * from the public internet, executing an arbitrary command as root. The shell is not a public API.
+ */
 export const ROUTE_HEALTHZ = "/healthz";
 export const ROUTE_RUN = "/run";
-
+export const ROUTE_TERMINAL = "/ws/terminal";
 export const ROUTE_ROOT = "/";
 
 /**
- * The interactive terminal. A WebSocket upgrade here is proxied straight to the container PTY by
- * the SDK - `sandbox.terminal(request)` is the whole implementation, and deliberately so: it is the
- * platform's own mechanism, already handles PTY sizing, output buffering and reconnection, and is
- * maintained by the people who own the container runtime. The lease Durable Object that used to sit
- * here existed only to arbitrate between several simultaneous clients; with one operator there is
- * nothing to arbitrate, so it is gone.
+ * The environment variable holding the shared bearer token, and the prefix it arrives behind.
+ *
+ * Declared as a Worker SECRET (never in `wrangler.jsonc`, never committed, never baked into the
+ * image). Only one side of this is interesting: a request that does not present the token is
+ * refused, and the check FAILS CLOSED if the secret is unset - an unconfigured Worker refuses
+ * everything rather than allowing everything, because the failure mode of the other choice is a
+ * public root shell.
+ *
+ * A single shared token is the honest amount of auth for one operator. It is not a user system, and
+ * it is not pretending to be one. Cloudflare Access would be the better layer; the API for creating
+ * the Access application returns 403 with the token this account has, and shipping a security
+ * control that has never been exercised is worse than shipping a token that has been.
  */
-export const ROUTE_TERMINAL = "/ws/terminal";
+export const AUTH_TOKEN_ENV = "DSH_TOKEN";
+export const BEARER_PREFIX = "Bearer ";
 
-/** The one protocol token we compare against; WebSocket upgrades are fixed by spec. */
+/** HTTP methods we dispatch on, and the one WebSocket protocol token we compare. */
+export const METHOD_GET = "GET";
+export const METHOD_POST = "POST";
 export const WEBSOCKET_UPGRADE = "websocket";
 
 /**
- * The R2 binding the durable state is mounted from, and where it lands in the container.
+ * The R2 binding for durable state.
  *
- * The mount is credential-less: the SDK signs the requests inside the Durable Object rather than
- * writing a key into the container, which is why the Worker has to export `ContainerProxy` beside
- * the sandbox class. The mount does not survive the container being recreated, so it is established
- * before every command rather than once at boot.
+ * NOTE: nothing mounts this. s3fs was measured failing three separate ways - refusing a non-empty
+ * mountpoint, returning `Input/output error` on `ls` after a mount that reported success, and being
+ * unusably slow for a git/npm workload - so the mount is not on the path to anything and its
+ * plumbing is gone rather than parked. The binding stays declared because the bucket exists and is
+ * the intended home for bytes that must outlive a container; git remains the source of truth for
+ * work, and the trade-off is explicit: uncommitted work is lost when the container is replaced.
  */
 export const STATE_BINDING = "STATE";
-export const STATE_MOUNT_PATH = "/mnt/state";
-
-/**
- * `mountBucket` throws when the path is already mounted, which is a normal, successful outcome: on a
- * warm container the mount is simply already there. Matching on this fragment is a string contract
- * we do not own - the SDK's own error text is the only signal it offers - so it is named once here
- * rather than spelled into the catch.
- */
-export const MOUNT_ALREADY_IN_USE = "already in use";
-
-/**
- * s3fs flags passed to the mount.
- *
- * `nonempty` is the one that matters: a failed mount leaves the mountpoint directory behind
- * and non-empty, and s3fs then refuses every later attempt with "MOUNTPOINT directory
- * /mnt/state is not empty". That is a self-perpetuating failure - once it happens, the mount
- * can never succeed again on that container, so durability is lost silently and permanently.
- * The directory is ours and nothing else writes to it, so mounting over it is safe.
- */
-export const S3FS_MOUNT_OPTIONS = ["nonempty"];
 
 /**
  * Request and response field names. Protocol tokens stay inline; anything the JSON contract of
  * *this* Worker defines is named here.
  */
-/** Reported when the durable mount failed but the command still ran. Never a silent field. */
-export const MOUNT_ERROR_FIELD = "mount_error";
-
-/** Request and response field names. Protocol tokens stay inline; anything the JSON contract of
- * *this* Worker defines is named here. */
 export const COMMAND_FIELD = "command";
 export const SERVICE_FIELD = "service";
 export const OK_FIELD = "ok";
+export const ROUTES_FIELD = "routes";
+export const ROUTE_FIELD = "route";
+export const METHOD_FIELD = "method";
+export const DESCRIPTION_FIELD = "description";
 export const ERROR_FIELD = "error";
-
-/** HTTP methods we dispatch on. */
-export const METHOD_GET = "GET";
-export const METHOD_POST = "POST";
