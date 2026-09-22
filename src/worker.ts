@@ -48,7 +48,37 @@ import {
 } from "./names";
 import { getSandbox, type Sandbox, type SandboxOptions } from "@cloudflare/sandbox";
 
-export { Sandbox } from "@cloudflare/sandbox";
+/**
+ * BOTH exports are required. The second is not optional, and its absence is what stopped this
+ * container from ever starting.
+ *
+ * `Sandbox` is the Durable Object class the `containers` binding names. `ContainerProxy` is a
+ * WorkerEntrypoint the SDK builds its outbound-interception fetchers through, and the SDK states the
+ * requirement in its own source (sandbox-D0rNqxlr.js:7201-7206): "Users must export this class from
+ * their Worker entrypoint so the Sandbox DO can create outbound-interception fetchers that
+ * reference it."
+ *
+ * When it is missing, the base Container class throws (containers/dist/lib/container.js:1176):
+ *
+ *   ctx.exports.ContainerProxy is undefined, export ContainerProxy from the containers package
+ *   in your worker entrypoint
+ *
+ * Why it fires here even though nothing mounts anything: interception is switched on by
+ * `persistedOutboundConfiguration !== undefined` (container.js:362), and that configuration is
+ * PERSISTED IN DURABLE OBJECT STORAGE (container.js:1065, key OUTBOUND_CONFIGURATION). The earlier
+ * "Layer 1: the R2 binding mount" deploy called mountBucket, which set outbound handlers and wrote
+ * that record. The mount code is gone; the record is not, and this is still the same object
+ * (`SANDBOX_ID = "dsh"`), so every construction since restores it and turns interception back on.
+ *
+ * The symptom looked nothing like the cause: `container.startup` warned
+ * "ctx.exports.ContainerProxy is undefined", the SDK retried eight times over 135 seconds, and all a
+ * caller ever saw was 502 "Container is starting. Please retry in a moment." - permanently.
+ *
+ * The official minimal example exports only `Sandbox` and gets away with it precisely because it
+ * never mounts, so it never persists an outbound configuration. Any app that has ever mounted one
+ * needs this export permanently.
+ */
+export { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
 
 export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
