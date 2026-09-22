@@ -144,16 +144,46 @@ RUN set -eux; \
       if command -v corepack >/dev/null 2>&1 \
          && corepack enable >/dev/null 2>&1 \
          && corepack prepare pnpm@10.4.0 --activate >/dev/null 2>&1 \
-         && (cd "$profile" && pnpm install --frozen-lockfile); then \
+         && (cd "$profile" && pnpm install --prod --frozen-lockfile); then \
         echo "pnpm installed $profile from its frozen lockfile"; \
       else \
         echo "pnpm unavailable or the lockfile did not resolve; falling back to npm for $profile"; \
-        (cd "$profile" && npm install --no-audit --no-fund --no-package-lock); \
+        (cd "$profile" && npm install --omit=dev --no-audit --no-fund --no-package-lock); \
       fi; \
     done
+# --prod / --omit=dev above: the profile is RUN, never built. Its dev dependencies are a build-time
+# concern and were the largest single contributor to the image overshooting the 2000 MB limit.
+# Shipping a linter to a shell container is not a feature.
 # ==================================================================================================
 # END AGENT WORKSPACE CONFIGURATION
 # ==================================================================================================
+
+# ==================================================================================================
+# Reclaim the build's own weight.
+#
+# The first build of this image was 2233 MB against the platform's 2000 MB limit, so it deployed
+# nowhere. This layer removes what the build needed but the running container does not: the npm and
+# pnpm caches, mise's downloads and its cache, pip's wheel cache, and any stray package lists.
+# Nothing here changes what the container can do — it deletes only things that would be re-fetched
+# on demand, if ever. Build output is kept honest by running this LAST, so it also sweeps the
+# layers added by the agent configuration above.
+#
+# The disk figure is what this is really about: the container provisions 2 GB of disk on `lite` and
+# the image is billed against that. A thin image is a cheaper image, and cold starts are shorter.
+# ==================================================================================================
+RUN set -eux; \
+    npm cache clean --force 2>/dev/null || true; \
+    rm -rf \
+      /root/.npm \
+      /root/.cache \
+      /root/.local/share/mise/downloads \
+      /root/.local/share/pnpm/store \
+      /root/.pnpm-store \
+      /tmp/* \
+      /var/tmp/* \
+      /var/lib/apt/lists/* \
+      /var/cache/apt/*; \
+    find / -xdev -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Documentation only: the platform reads the port from the Durable Object, not from this line.
 EXPOSE 8080
