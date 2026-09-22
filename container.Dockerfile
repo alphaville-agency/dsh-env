@@ -1,20 +1,15 @@
-# The developer workspace. NOT the agency: it may disappear without affecting production, and the
-# agency must never depend on it.
+# The developer workspace. NOT the agency: it may disappear without affecting production.
 #
-# There is no Tailscale here on purpose. Cloudflare Containers have no public port at all - access
-# is `wrangler containers ssh`, authenticated against the Cloudflare account - so a tailnet would be
-# a second access path to the same box, which is the "two ways to do one thing" defect this project
-# keeps naming. It was in an earlier revision because Render needed it; Render is gone.
+# Alpine, not Debian: this image exists to give one developer a shell, so every megabyte is a
+# megabyte pulled on every cold start. No Tailscale - Cloudflare Containers have no public port and
+# are reached with `wrangler containers ssh`, so a tailnet would be a second path to the same box.
 #
-# Disk is EPHEMERAL: a sleeping container wakes with a fresh disk. The image carries the toolchain
-# and git carries the state. That is an honest fit for an agent workspace and a poor one for
-# anything else.
-FROM debian:bookworm-slim
+# Disk is EPHEMERAL. The image carries the toolchain; git carries the state.
+FROM alpine:3.20
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git openssh-server tmux less jq ripgrep \
-      python3 python3-venv python3-pip nodejs npm \
- && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache \
+      openssh git curl jq ripgrep less tmux \
+      python3 py3-pip nodejs npm
 
 # The harness, so the workspace is the same one used locally.
 RUN npm install -g @deepseek-ai/dsh
@@ -25,8 +20,11 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /work
 
-# sshd in the foreground. Containers reach this over `wrangler containers ssh` with an ed25519 key
-# declared in wrangler.jsonc; nothing listens on a public interface.
+# Keeps the container awake only while a session is attached. An SSH connection is not an incoming
+# request, so it does not reset the sleep timer on its own - this is what does.
+COPY keepalive.sh /usr/local/bin/keepalive.sh
+RUN chmod +x /usr/local/bin/keepalive.sh
+
 RUN mkdir -p /run/sshd
 EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D", "-e"]
+CMD ["/usr/local/bin/keepalive.sh"]
