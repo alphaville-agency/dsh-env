@@ -110,8 +110,9 @@ Plus the SDK's own preview-URL proxy, which `proxyToSandbox()` answers first.
 | `tests/leases.test.mjs` | the lease rules, run by Node's own test runner |
 | `tests/dockerfile.test.mjs` | every `COPY` source exists, and what was cut stays cut |
 | `container.Dockerfile` | the image: the official sandbox base plus the workspace toolchain |
-| `.dsh/` | the harness home the image installs (instructions, rules, settings, ontology, profile manifests) |
-| `.agents/` | the skill catalog manifest (`skills.json`) and the local-only skills |
+| `.dsh/` | the harness home (instructions, rules, settings, ontology, profile manifests) |
+| `.apm/` | the agent primitives this repository authors (the three local-only skills) |
+| `apm.yml` / `apm.lock.yaml` | the agent configuration manifest and its lockfile — see [Agent configuration](#agent-configuration) |
 | `dsh-install/` | the committed manifest and lockfile for the harness CLI |
 | `tools/` | repo-side tooling for the operator's laptop (`sync.sh`, `check-drift.sh`) |
 | `docs/COST.md` | what awake time costs, and the rule that follows from it |
@@ -359,15 +360,74 @@ is held as a Worker secret and handed to the sandbox at run time through the SDK
 `ENV` in the Dockerfile. `tools/sync.sh` refuses to finish if it finds a credential-shaped string in
 the vendored tree, and the only literal-looking matches it reports are documentation placeholders.
 
-## Refreshing the vendored configuration
+## Agent configuration
 
-The agent configuration — skills, rules and instructions — is declared in `apm.yml` and deployed
-under `.agents/skills/`. **That migration is in flight and is not mine to finish:** `apm.yml` names
-its sources under `.apm/`, `.agents/local/` is empty, and `tools/sync.sh` / `tools/check-drift.sh`
-still describe the layout that came before it. The image installs the three local-only skills from
-`.apm/local/` (see the `COPY` in `container.Dockerfile`), which is where they live now and what
-makes the image resolvable today. Whoever lands the migration should reconcile the two rather than
-leave both paths load-bearing.
+The agent configuration is declared with **[APM](https://microsoft.github.io/apm/)** (the Agent
+Package Manager) and installed with it. There is one manifest and one lockfile, and both are
+committed:
 
-**The container never reads from the laptop.** A change to the vendored config takes effect only after
-a rebuild and a deploy: the image carries the files, and the next wake starts from the image.
+| what | where | committed? |
+|---|---|---|
+| the declaration — every skill, and the primitives this repository authors | `apm.yml` | yes |
+| the pins — each package's commit SHA, its content hash, and a SHA-256 per deployed file | `apm.lock.yaml` | yes |
+| the primitives we author | `.apm/` (a skill per `.apm/local/<name>/SKILL.md`) | yes |
+| the deployed tree | `.agents/skills/` | **no** — rebuilt by `apm install`, ignored by `.agents/.gitignore` |
+| the download cache | `apm_modules/` | **no** — ignored in `.gitignore` |
+
+```sh
+apm install              # deploy from apm.yml, then write apm.lock.yaml
+apm install --frozen     # install strictly from the lockfile; no resolution, no drift (CI-safe)
+apm audit                # hidden-Unicode scan + drift replay against the lockfile (advisory)
+apm audit --ci           # the same as a gate: exit 1 on drift or any failed check
+apm install --update     # move the pins to newer upstream commits, then re-review
+```
+
+**What to run before committing a config change.** Edit `apm.yml` (or `.apm/`), then:
+
+```sh
+apm install              # deploys and REGENERATES apm.lock.yaml
+apm audit --ci           # the gate: lockfile, hashes, drift, hidden Unicode
+sh tools/check-drift.sh  # the ontology pin and the host-path rule (APM does not cover those)
+```
+
+and commit `apm.yml` **together with** `apm.lock.yaml`. The manifest and the lockfile are one change:
+committing the manifest alone leaves every consumer's install out of sync with the pins.
+
+### What APM checks on every install, because it is the reason this replaced the hand-rolled pair
+
+- **Hidden Unicode**, scanned in every primitive before anything is deployed. Critical findings
+  (bidi overrides, tag characters, the Glassworm variation-selector range) block the install;
+  warnings exit non-zero from `apm audit`. Verified on this repository against crafted files: a
+  U+200B produced a WARNING and exit 2, a U+202E produced a CRITICAL and exit 1.
+- **Content hashes.** Every fetched package's file tree is SHA-256'd and compared with
+  `apm.lock.yaml`; a mismatch aborts and the partial download is removed. A cache hit re-verifies
+  the checkout's HEAD against the locked commit, so a poisoned cache cannot deploy wrong content
+  under the right name.
+- **Drift.** `apm audit` replays the install into a scratch tree and diffs it against the working
+  tree, so a hand-edit to a deployed file is `modified` drift and `apm audit --ci` exits 1.
+  Verified here by hand-editing a deployed `SKILL.md` and watching both `content-integrity` and
+  `drift` fail.
+
+### Every remote dependency is pinned to a commit SHA, not a branch
+
+`apm.yml` names a commit SHA for each upstream skill. A branch reference would let the content
+behind a name move without any edit here — which is exactly the drift the hand-written
+`.agents/skills.json` and its bespoke lock existed to stop, and did not. A SHA needs no network to
+replay and is what `apm.lock.yaml` pins.
+
+### The three things APM does not express, and what happens instead
+
+1. **The naming ontology** (`.dsh/ontology/`) stays hand-pinned by `PIN.json` and checked by
+   `tools/check-drift.sh`. APM has no primitive for "a pinned copy of two files from another repo
+   into a path of my choosing", and the declared source repository does not exist to depend on.
+2. **The rules** (`.dsh/rules/`) stay hand-authored. APM's instruction primitive deploys only for
+   the `copilot` target (`.github/instructions/`) and never for `agent-skills`, the only target this
+   repository uses, so declaring them would produce files nothing here reads.
+3. **The harness home** (`.dsh/settings.yaml`, `.dsh/persistence.json`, `.dsh/profiles/`) has no APM
+   equivalent: `dsh` reads it from a path, not from a package graph.
+
+### Refreshing the deployed catalog
+
+The container's clone is the working tree: `apm install --frozen` in it redeploys `apm.yml` from the
+committed lockfile with no resolution and no drift. The **container never reads from the laptop** —
+a change reaches the container through the repository, and the image carries the toolchain.
