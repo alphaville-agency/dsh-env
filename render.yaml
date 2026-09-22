@@ -1,0 +1,12 @@
+# Render blueprint for the developer environment only. Free web services sleep, which defeats an
+# interactive workspace, so this is written for a small always-on plan.
+services:
+  - type: web
+    name: dsh-workspace
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - fromGroup: dsh-tui
+      - key: TS_HOSTNAME
+        value: dsh
