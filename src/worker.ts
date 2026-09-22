@@ -4,7 +4,7 @@
 // `wrangler containers ssh`, which has no public port.
 import { Container, getContainer } from "@cloudflare/containers";
 
-export class DshContainer extends Container<Env> {
+export class DshShell extends Container<Env> {
   defaultPort = 22;
   // Keep alive only while a session is attached. The default stops after 10 minutes of no
   // requests, which would kill an interactive shell mid-thought.

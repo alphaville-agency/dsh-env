@@ -1,11 +1,12 @@
 {
-  "name": "dsh-workspace",
+  "name": "prod-tooling-dsh-shell",
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-01",
   "containers": [
     {
-      "class_name": "DshContainer",
-      "image": "ghcr.io/alphaville-agency/dsh-workspace:latest",
+      "class_name": "DshShell",
+      "name": "prod-tooling-dsh-shell",
+      "image": "./container.Dockerfile",
       "instance_type": "standard-1",
       "max_instances": 1,
       "ssh": {
@@ -16,15 +17,14 @@
           "name": "dsh",
           "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC+FNHSJUqtrnnyea86mdZmXNZJ+c+4LXXtc9ml47eA2 dsh@alphaville.space"
         }
-      ],
-      "name": "dsh-workspace"
+      ]
     }
   ],
   "durable_objects": {
     "bindings": [
       {
         "name": "DSH",
-        "class_name": "DshContainer"
+        "class_name": "DshShell"
       }
     ]
   },
@@ -32,8 +32,14 @@
     {
       "tag": "v1",
       "new_sqlite_classes": [
-        "DshContainer"
+        "DshShell"
       ]
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "dsh.alphaville.space",
+      "custom_domain": true
     }
   ]
 }
