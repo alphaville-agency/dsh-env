@@ -19,6 +19,7 @@ import {
   ERROR_FIELD,
   METHOD_GET,
   METHOD_POST,
+  MOUNT_ALREADY_IN_USE,
   OK_FIELD,
   ROUTE_HEALTHZ,
   ROUTE_RUN,
@@ -26,13 +27,21 @@ import {
   SERVICE_FIELD,
   SERVICE_NAME,
   SLEEP_AFTER,
+  STATE_BINDING,
+  STATE_MOUNT_PATH,
 } from "./names";
 
-// wrangler finds a Durable Object class by its export, and this is the SDK's own class.
-export { Sandbox } from "@cloudflare/sandbox";
+// wrangler finds a Durable Object class by its export, and `Sandbox` is the SDK's own class.
+//
+// `ContainerProxy` is exported beside it because the credential-less R2 mount intercepts outbound
+// S3 requests inside the Durable Object, and the SDK refuses the mount without it. This export was
+// present all along during the 1101 and was NOT the fault: what was missing was `ctx.exports`, the
+// runtime's loopback bindings, which its compatibility date did not yet provide. See wrangler.jsonc.
+export { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
 
 export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
+  STATE: R2Bucket;
 }
 
 // `keepAlive` is deliberately absent: its default, false, is what lets the container stop. When the
@@ -43,6 +52,25 @@ const SANDBOX_OPTIONS: SandboxOptions = {
 
 function sandboxFor(env: Env): Sandbox {
   return getSandbox(env.Sandbox, SANDBOX_ID, SANDBOX_OPTIONS);
+}
+
+/**
+ * Establish the durable state mount, and say whether THIS call created it.
+ *
+ * An already-mounted path is a success, not a failure: that is exactly what a warm container looks
+ * like. Mounts live on the container filesystem and do not survive the container being recreated,
+ * so this runs before every command rather than once at boot - there is no boot hook and nothing
+ * polls, which is the rule this environment is built around (docs/COST.md).
+ */
+async function ensureStateMounted(sandbox: Sandbox): Promise<boolean> {
+  try {
+    await sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {});
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes(MOUNT_ALREADY_IN_USE)) throw error;
+    return false;
+  }
 }
 
 /** Run one command and hand back the buffered result. This request is what wakes the sandbox. */
@@ -56,7 +84,13 @@ async function runCommand(request: Request, env: Env): Promise<Response> {
     );
   }
 
-  const { stdout, stderr, exitCode, success } = await sandboxFor(env).exec(command);
+  const sandbox = sandboxFor(env);
+  // The mount is the durable state, and it does not survive the container being recreated, so it is
+  // established on the way to every command. On a warm container this is one "already mounted" round
+  // trip; on a cold one it is what makes /mnt/state exist before anything writes to it.
+  await ensureStateMounted(sandbox);
+
+  const { stdout, stderr, exitCode, success } = await sandbox.exec(command);
   return Response.json({ stdout, stderr, exitCode, success });
 }
 

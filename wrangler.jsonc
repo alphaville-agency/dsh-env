@@ -43,11 +43,21 @@
   },
   // v1, and only v1: this Worker name is new, so its Durable Object namespace is new too. There is
   // no applied migration history to preserve and therefore no tombstones - the three tags the
-  // previous `shared-tooling-dsh-shell` Worker needed recorded its own history, not this one's.
+  // previous, dev-named Worker needed recorded its own history, not this one's.
   "migrations": [
     {
       "new_sqlite_classes": ["Sandbox"],
       "tag": "v1"
+    }
+  ],
+
+  // The durable state, mounted at /mnt/state with no credentials anywhere: the SDK signs the
+  // requests inside the Durable Object, which is why `ContainerProxy` is exported from the entry.
+  // Layer 1 of the rebuild, and the thing the 1101 was thrown on the way to.
+  "r2_buckets": [
+    {
+      "binding": "STATE",
+      "bucket_name": "af-shared-tooling-dsh"
     }
   ],
   "routes": [

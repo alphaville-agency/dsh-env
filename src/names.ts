@@ -33,6 +33,25 @@ export const ROUTE_HEALTHZ = "/healthz";
 export const ROUTE_RUN = "/run";
 
 /**
+ * The R2 binding the durable state is mounted from, and where it lands in the container.
+ *
+ * The mount is credential-less: the SDK signs the requests inside the Durable Object rather than
+ * writing a key into the container, which is why the Worker has to export `ContainerProxy` beside
+ * the sandbox class. The mount does not survive the container being recreated, so it is established
+ * before every command rather than once at boot.
+ */
+export const STATE_BINDING = "STATE";
+export const STATE_MOUNT_PATH = "/mnt/state";
+
+/**
+ * `mountBucket` throws when the path is already mounted, which is a normal, successful outcome: on a
+ * warm container the mount is simply already there. Matching on this fragment is a string contract
+ * we do not own - the SDK's own error text is the only signal it offers - so it is named once here
+ * rather than spelled into the catch.
+ */
+export const MOUNT_ALREADY_IN_USE = "already in use";
+
+/**
  * Request and response field names. Protocol tokens stay inline; anything the JSON contract of
  * *this* Worker defines is named here.
  */
