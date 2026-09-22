@@ -1,11 +1,16 @@
 #!/bin/sh
-# Wrap a login shell. The lease is renewed while the session is open and removed on exit, so the
-# workspace reports idle the moment the last developer disconnects.
+# Wrap a login shell. While it is open the session renews its lease on the tailnet and polls the
+# public health endpoint, which is what stops a free service from sleeping. On exit both stop, the
+# lease is removed, and the workspace is allowed to idle.
 LEASE_NAME="${USER:-dev}-$$"
 STATUS="${DSH_STATUS_URL:-http://127.0.0.1:8787}"
+PUBLIC="${DSH_PUBLIC_HEALTH_URL:-}"
 renew() { curl -fsS -m 5 -X POST -H "X-Lease-Name: $LEASE_NAME" "$STATUS/lease" >/dev/null 2>&1 || true; }
-renew
+poke()  { [ -n "$PUBLIC" ] && curl -fsS -m 5 "$PUBLIC" >/dev/null 2>&1 || true; }
+renew; poke
 ( while :; do sleep 30; renew; done ) &
-HEARTBEAT=$!
-trap 'kill $HEARTBEAT 2>/dev/null; rm -f "${DSH_LEASE_DIR:-/run/dsh-leases}/$LEASE_NAME"' EXIT INT TERM
+HB=$!
+( while :; do sleep 600; poke; done ) &
+PK=$!
+trap 'kill $HB $PK 2>/dev/null; rm -f "${DSH_LEASE_DIR:-/run/dsh-leases}/$LEASE_NAME"' EXIT INT TERM
 exec "${SHELL:-/bin/sh}" -l

@@ -11,4 +11,4 @@ COPY . /work
 RUN python3 -m venv /work/.venv || true
 # Joins the tailnet as a tagged, ephemeral node using the OAuth client secret from the dsh-tui group, which Tailscale accepts in place of an auth key, then
 # stays up. Ephemeral so a restarted container does not accumulate stale devices in the tailnet.
-CMD ["sh","-lc","tailscale up --auth-key=\"$TAILSCALE_OAUTH_CLIENT_SECRET\" --hostname=\"${TS_HOSTNAME:-dsh}\" --ephemeral --accept-routes || true; python3 /work/keepalive.py & exec tail -f /dev/null"]
+CMD ["sh","-lc","tailscale up --auth-key=\"$TAILSCALE_OAUTH_CLIENT_SECRET\" --hostname=\"${TS_HOSTNAME:-dsh}\" --ephemeral --accept-routes || true; DSH_PUBLIC_HEALTH_URL="http://127.0.0.1:${PORT:-10000}/healthz" python3 /work/keepalive.py & exec tail -f /dev/null"]
