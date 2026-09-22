@@ -32,6 +32,15 @@ WORKDIR /work
 COPY keepalive.sh /usr/local/bin/keepalive.sh
 RUN chmod +x /usr/local/bin/keepalive.sh
 
-RUN mkdir -p /run/sshd /root/.dsh
+# The platform's SSH proxy connects as `cloudchamber`, which Alpine does not have. The key is
+# installed for both that user and root so whichever identity the proxy presents is accepted -
+# guessing once already cost a round trip.
+RUN adduser -D -s /bin/sh cloudchamber \
+ && mkdir -p /run/sshd /root/.dsh /root/.ssh /home/cloudchamber/.ssh \
+ && printf '%s\n' "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC+FNHSJUqtrnnyea86mdZmXNZJ+c+4LXXtc9ml47eA2 dsh@alphaville.space" > /root/.ssh/authorized_keys \
+ && cp /root/.ssh/authorized_keys /home/cloudchamber/.ssh/authorized_keys \
+ && chmod 700 /root/.ssh /home/cloudchamber/.ssh \
+ && chmod 600 /root/.ssh/authorized_keys /home/cloudchamber/.ssh/authorized_keys \
+ && chown -R cloudchamber:cloudchamber /home/cloudchamber/.ssh
 EXPOSE 22 8080
 CMD ["/usr/local/bin/keepalive.sh"]
