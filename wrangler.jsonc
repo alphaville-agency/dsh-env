@@ -1,5 +1,5 @@
 {
-  "name": "alphaville-dsh",
+  "name": "dsh-workspace",
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-01",
   "containers": [
@@ -16,7 +16,8 @@
           "name": "dsh",
           "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC+FNHSJUqtrnnyea86mdZmXNZJ+c+4LXXtc9ml47eA2 dsh@alphaville.space"
         }
-      ]
+      ],
+      "name": "dsh-workspace"
     }
   ],
   "durable_objects": {
