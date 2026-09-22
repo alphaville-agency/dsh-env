@@ -1,0 +1,10 @@
+{
+  "source_repo": "alphaville-agency/capability",
+  "derived_from": "names/",
+  "pinned_at": "2026-09-22T06:02:11Z",
+  "files": {
+    "registry.json": "3dbfbfa45baa56d3e259756441dacd9422bf0a6a4d88a925a3ec84a7ca6950c3",
+    "validate.py": "b6b7577675ac176991a0bdababa02018ae7899a8d0eadef205fd74a85e198b21"
+  },
+  "rule": "This is a derived, read-only copy of the canonical registry. Edit the canonical copy in the capability repo and re-run agent/sync.sh. A local edit here is drift and the check will fail."
+}

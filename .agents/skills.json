@@ -1,0 +1,29 @@
+{
+  "manifestVersion": 1,
+  "description": "The skill catalog this environment installs at container start. It is a MANIFEST, not a vendored tree: nothing in it is stored in this repository, and `npx skills` fetches each entry into the discovery path (/root/.agents/skills, the clone's .agents/skills) at run time. See bin/dsh-state.sh.",
+  "installedWith": "skills add <source> -g -y",
+  "sourcesVerified": "Each `source` below was confirmed against the copy this repository used to vendor, by computing the Skills CLI's own folder hash (sha256 over sorted path+content, .git and node_modules skipped) for the vendored directory and for a fresh install of the source. 17 of the 21 matched byte for byte. `i-have-adhd` is the same skill as the vendored copy but has moved on upstream - which is the drift this manifest exists to stop following by hand. The three entries pointing at ./.agents/local are ours, or have no confirmed upstream, and are recorded in .agents/local/README.md.",
+  "skills": [
+    { "name": "agents-sdk", "source": "cloudflare/skills@agents-sdk" },
+    { "name": "cloudflare", "source": "cloudflare/skills@cloudflare" },
+    { "name": "cloudflare-email-service", "source": "cloudflare/skills@cloudflare-email-service" },
+    { "name": "cloudflare-one", "source": "cloudflare/skills@cloudflare-one" },
+    { "name": "cloudflare-one-migrations", "source": "cloudflare/skills@cloudflare-one-migrations" },
+    { "name": "durable-objects", "source": "cloudflare/skills@durable-objects" },
+    { "name": "nextjs-on-cloudflare", "source": "cloudflare/skills@nextjs-on-cloudflare" },
+    { "name": "sandbox-migrate-to-next", "source": "cloudflare/skills@sandbox-migrate-to-next" },
+    { "name": "sandbox-next", "source": "cloudflare/skills@sandbox-next" },
+    { "name": "sandbox-stable", "source": "cloudflare/skills@sandbox-stable" },
+    { "name": "turnstile-spin", "source": "cloudflare/skills@turnstile-spin" },
+    { "name": "web-perf", "source": "cloudflare/skills@web-perf" },
+    { "name": "workers-best-practices", "source": "cloudflare/skills@workers-best-practices" },
+    { "name": "wrangler", "source": "cloudflare/skills@wrangler" },
+    { "name": "ascii-art", "source": "neethanwu/ascii-art@ascii-art" },
+    { "name": "find-skills", "source": "vercel-labs/skills@find-skills" },
+    { "name": "hallmark", "source": "nutlope/hallmark@hallmark" },
+    { "name": "i-have-adhd", "source": "ayghri/i-have-adhd@i-have-adhd" },
+    { "name": "alphaville", "source": "./.agents/local/alphaville" },
+    { "name": "cmo", "source": "./.agents/local/cmo" },
+    { "name": "plane", "source": "./.agents/local/plane" }
+  ]
+}

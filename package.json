@@ -1,6 +1,7 @@
 {
   "name": "alphaville-dsh",
   "private": true,
+  "type": "module",
   "description": "The developer workspace. Not the agency: it may disappear without affecting production.",
   "scripts": {
     "deploy": "wrangler deploy",

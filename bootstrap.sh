@@ -8,6 +8,14 @@
 # with the image and is not needed here, because the only thing this downloads is the client, which
 # the container runs.
 #
+# Arguments are passed straight through to `dsh.sh`, so:
+#
+#   ... | sh -s -- --takeover     an interactive terminal that takes the input lease
+#   ... | sh -s -- uname -a       run one command instead of opening the TUI
+#
+# One client holds the input lease at a time. A second window attaches live but read-only and says
+# so; `--takeover` is how it takes over, which drops the previous holder to read-only immediately.
+#
 # Why a bootstrap rather than piping dsh.sh straight into a shell: `dsh.sh` launches an interactive
 # TUI, and `curl ... | sh` hands the terminal's stdin to `sh` to read the script from. The TUI then
 # has no terminal to talk to. This script is fetched to disk and run, so stdin stays the terminal,

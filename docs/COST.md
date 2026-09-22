@@ -46,6 +46,13 @@ roughly 3.3 hours of awake container every day.
 - **No process inside the container may ever heartbeat, poll or ping to stay awake.** Any such loop
   turns "cost while I work" into "cost while I live". This is why `keepalive.sh` was deleted, and why
   the Worker's `/healthz` deliberately never touches the sandbox.
+- **A session with work in progress is deliberately kept awake, and that is correctness, not an
+  oversight.** The container stops when no work is in progress; "work" means a bounded declaration
+  from inside the container (`POST /work`, begin and end), not keystrokes and not an attached window.
+  So an agent running a goal with nobody watching does not get slept out from under, and an idle
+  window still sleeps on `sleepAfter`. Do not "optimise" this away: the two messages per unit of work
+  are what stops the workspace dying mid-task, and the declaration lapses on its own deadline if the
+  end is never sent.
 - **A `scratch` or statically-linked-binary image does not reduce this bill.** Memory and disk are
   billed on provisioned resources for the chosen instance type, so shrinking the image does not lower
   the rate. It must not be reintroduced on cost grounds.

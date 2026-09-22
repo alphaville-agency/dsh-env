@@ -24,6 +24,10 @@
       {
         "class_name": "Sandbox",
         "name": "Sandbox"
+      },
+      {
+        "class_name": "DshLease",
+        "name": "LEASE"
       }
     ]
   },
@@ -31,6 +35,9 @@
   // rewritten, because a migration tag that has been applied cannot be redefined - the platform
   // refuses it. v2 is therefore the change: the class is now the SDK's `Sandbox`, and the abandoned
   // `DshShell` is deleted in the same migration so no trace of the replaced design is left bound.
+  //
+  // v3 is the input/awake lease and the terminal fan-out. It is a new tag because v1 and v2 have
+  // already been applied and cannot be redefined; `Sandbox` is untouched by it.
   "migrations": [
     {
       "new_sqlite_classes": ["DshShell"],
@@ -40,6 +47,10 @@
       "new_sqlite_classes": ["Sandbox"],
       "deleted_classes": ["DshShell"],
       "tag": "v2"
+    },
+    {
+      "new_sqlite_classes": ["DshLease"],
+      "tag": "v3"
     }
   ],
   "r2_buckets": [

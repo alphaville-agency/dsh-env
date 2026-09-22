@@ -86,10 +86,10 @@ RUN mise trust mise.toml && mise install
 # environment is reproducible, reviewable and identical for every session, and so a fresh container
 # needs no manual setup.
 #
-# LIVE CREDENTIALS ARE THE OPPOSITE and must NEVER be baked in. agent/settings.yaml names the gateway
+# LIVE CREDENTIALS ARE THE OPPOSITE and must NEVER be baked in. .dsh/settings.yaml names the gateway
 # key by ENVIRONMENT VARIABLE (apiKeyEnv: CHEAPINFERENCE_COM_API_KEY) and holds no value; the value
 # is injected at run time from Worker secrets. agent/sync.sh refuses to finish if it finds a
-# credential-shaped string in the vendored tree, and agent/ontology/check-drift.sh proves the tree
+# credential-shaped string in the vendored tree, and .dsh/ontology/check-drift.sh proves the tree
 # still matches its pins.
 #
 # ONE SKILL CATALOG, IN THE CONVENTIONAL LOCATION. Skills are discovered by the harness from
@@ -103,11 +103,14 @@ ENV HOME=/root
 
 # The instruction and configuration files, plus the rules directory, in one layer. The rules are
 # copied as a directory, so this lands at /root/.dsh/rules/ exactly as the AGENTS.md router links it.
-COPY agent/AGENTS.md agent/MODEL-ROLES.md agent/settings.yaml agent/rules/ /root/.dsh/
+COPY .dsh/AGENTS.md .dsh/MODEL-ROLES.md .dsh/settings.yaml .dsh/rules/ /root/.dsh/
 
-# The skill catalog, installed where the harness looks for skills and nowhere else. 25 skills,
-# including plane, vendored verbatim and pinned by agent/skills-lock.json.
-COPY agent/skills/ /root/.agents/skills/
+# The few skills that exist only here, installed into the discovery path the harness already
+# searches. The rest of the catalog is NOT vendored into the image: `.agents/skills.json` is the
+# manifest and the rest are installed at run time, so the image carries no third-party copies and
+# skills stay current without a rebuild. These are the local-only ones, which have nowhere to be
+# fetched from and so must ride in the image.
+COPY .agents/local/ /root/.agents/skills/
 
 # The naming registry: a derived, READ-ONLY copy of the canonical registry in the capability repo,
 # pinned by PIN.json. Copied as the artefacts only - registry.json, validate.py, PIN.json and its
@@ -116,7 +119,7 @@ COPY agent/skills/ /root/.agents/skills/
 # exist here, and check-drift.sh verifies the catalog's repository layout. validate.py resolves
 # registry.json next to itself, so `python3 /root/.dsh/ontology/validate.py list` works as installed.
 # python3 is already in the image from the apt layer above; nothing is added for this.
-COPY agent/ontology/registry.json agent/ontology/validate.py agent/ontology/PIN.json agent/ontology/README.md /root/.dsh/ontology/
+COPY .dsh/ontology/registry.json .dsh/ontology/validate.py .dsh/ontology/PIN.json .dsh/ontology/README.md /root/.dsh/ontology/
 
 # The dsh profiles, which are what make `dsh` a TUI rather than a bare CLI. DSH_HOME is the parent of
 # profiles/, so it must agree with where this COPYs to and with where the instruction files above
@@ -127,7 +130,7 @@ ENV DSH_HOME=/root/.dsh
 # Only the declarative profile files are committed - package.json, pnpm-lock.yaml, pnpm-workspace
 # and the cordis layers. Installed dependencies are NOT in the repository and NOT in the build
 # context: they are regenerated here from the lockfile, which is what a lockfile is for.
-COPY agent/profiles/ /root/.dsh/profiles/
+COPY .dsh/profiles/ /root/.dsh/profiles/
 
 # The install, declarative and reproducible: corepack supplies pnpm at the version the lockfile was
 # written by (lockfileVersion 9.0 needs pnpm 9 or newer; 10.4.0 satisfies it and the lockfile declares
@@ -150,10 +153,16 @@ RUN set -eux; \
         echo "pnpm unavailable or the lockfile did not resolve; falling back to npm for $profile"; \
         (cd "$profile" && npm install --omit=dev --no-audit --no-fund --no-package-lock); \
       fi; \
-    done
+    done; \
+    npm cache clean --force 2>/dev/null || true; \
+    rm -rf /root/.npm /root/.cache /root/.pnpm-store /root/.local/share/pnpm /root/.local/share/pnpm-store
 # --prod / --omit=dev above: the profile is RUN, never built. Its dev dependencies are a build-time
-# concern and were the largest single contributor to the image overshooting the 2000 MB limit.
+# concern and were the largest single contributor to the image overshooting the limit.
 # Shipping a linter to a shell container is not a feature.
+#
+# The cache removal is INSIDE this RUN on purpose: a later `RUN rm -rf` does not shrink the image,
+# because Docker layers are additive and the bytes stay in the layer that created them. Deletion has
+# to happen in the same layer as the creation, or it only reclaims runtime disk.
 # ==================================================================================================
 # END AGENT WORKSPACE CONFIGURATION
 # ==================================================================================================

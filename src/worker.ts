@@ -1,23 +1,28 @@
 // The Worker in front of the dsh developer workspace.
 //
-// Two things happen here and nothing else. A request to /run or the terminal WebSocket is the
-// wake-up: `getSandbox()` starts a stopped container on first use, so there is no separate start
-// step to forget. And nothing in this file keeps it awake - it stops `sleepAfter` after the last
-// request, which is the whole cost control (see docs/COST.md).
+// Three things happen here and nothing else. A request to /run is a one-shot command. A WebSocket to
+// /ws/terminal is handed to the lease Durable Object, which owns the single upstream terminal socket
+// and decides who may type into it - see src/lease-do.ts. And /work is how the container declares
+// that an agent is working, so the workspace is not slept out from under it.
+//
+// Everything here is a request, and a request is the wake-up: `getSandbox()` starts a stopped
+// container on first use, so there is no separate start step to forget. Nothing in this file keeps
+// it awake - it stops `sleepAfter` after the last request, which is the whole cost control (see
+// docs/COST.md). The one thing that may deliberately extend that is the awake lease, and it does so
+// only when something inside the container says work is in progress.
 import {
   ContainerProxy,
   getSandbox,
   proxyToSandbox,
-  type PtyOptions,
   type Sandbox,
   type SandboxOptions,
 } from "@cloudflare/sandbox";
+import { DshLease, type WorkResult } from "./lease-do";
 import {
   COMMAND_FIELD,
-  DEFAULT_COLS,
-  DEFAULT_ROWS,
   DESCRIPTION_FIELD,
   ERROR_FIELD,
+  LEASE_ID,
   METHOD_GET,
   METHOD_POST,
   MOUNT_ALREADY_IN_USE,
@@ -27,26 +32,34 @@ import {
   ROUTE_ROOT,
   ROUTE_RUN,
   ROUTE_TERMINAL,
+  ROUTE_WORK,
   ROUTES_FIELD,
   SANDBOX_ID,
   SERVICE_FIELD,
   SERVICE_NAME,
-  SESSION_PARAM,
   SLEEP_AFTER,
   STATE_BINDING,
   STATE_MOUNT_PATH,
+  WEBSOCKET_UPGRADE,
+  WORK_TOKEN_FIELD,
+  WORK_UNTIL_FIELD,
 } from "./names";
 
 // The credential-less R2 mount intercepts outbound S3 requests inside the Durable Object, so
-// ContainerProxy has to be exported beside the sandbox itself or the mount fails.
+// ContainerProxy has to be exported beside the sandbox itself or the mount fails. DshLease is
+// exported for the same kind of reason: wrangler finds a Durable Object class by its export.
 export { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
+export { DshLease } from "./lease-do";
 
 export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
+  /** The lease Durable Object. The name must match LEASE_BINDING in wrangler.jsonc. */
+  LEASE: DurableObjectNamespace<DshLease>;
   STATE: R2Bucket;
 }
 
-// `keepAlive` is deliberately absent: its default, false, is what lets the container stop.
+// `keepAlive` is deliberately absent: its default, false, is what lets the container stop. The
+// awake lease turns it on and off again, and only while work is declared.
 const SANDBOX_OPTIONS: SandboxOptions = {
   sleepAfter: SLEEP_AFTER,
   enableDefaultSession: false,
@@ -54,6 +67,11 @@ const SANDBOX_OPTIONS: SandboxOptions = {
 
 function sandboxFor(env: Env): Sandbox {
   return getSandbox(env.Sandbox, SANDBOX_ID, SANDBOX_OPTIONS);
+}
+
+/** One Durable Object, addressed by name, so every isolate and region reaches the same lease. */
+function leaseFor(env: Env): DurableObjectStub<DshLease> {
+  return env.LEASE.getByName(LEASE_ID);
 }
 
 /**
@@ -105,6 +123,7 @@ function describe(): Response {
     [METHOD_GET, ROUTE_HEALTHZ, "liveness; does not start the container"],
     [METHOD_POST, ROUTE_RUN, `run one command: {"${COMMAND_FIELD}":"..."}`],
     [METHOD_GET, ROUTE_TERMINAL, "interactive terminal; needs a WebSocket upgrade"],
+    [METHOD_POST, ROUTE_WORK, "declare work in progress, so the container stays awake for it"],
   ].map(([method, path, description]) => ({
     [ROUTE_FIELD]: `${method} ${path}`,
     [DESCRIPTION_FIELD]: description,
@@ -113,34 +132,27 @@ function describe(): Response {
   return Response.json({ [SERVICE_FIELD]: SERVICE_NAME, [ROUTES_FIELD]: routes });
 }
 
-async function terminal(request: Request, env: Env, sessionId: string | null): Promise<Response> {
-  const sandbox = sandboxFor(env);
-  if (sessionId) {
-    const session = await sandbox.getSession(sessionId);
-    return await session.terminal(request);
-  }
-  // The default session's terminal is what the documented `sandbox.terminal(request)` reaches.
-  return await asTerminalHost(sandbox).terminal(request, {
-    cols: DEFAULT_COLS,
-    rows: DEFAULT_ROWS,
-  });
+/**
+ * Hand the upgrade to the lease Durable Object. It terminates the upgrade, holds the one socket to
+ * the container, and hands each client its own - which is the only way to let a second client watch
+ * live without being able to type.
+ */
+async function terminal(request: Request, env: Env): Promise<Response> {
+  return await leaseFor(env).fetch(request);
 }
 
 /**
- * `terminal()` exists on the sandbox the runtime hands back but is missing from the installed
- * stable typings: @cloudflare/sandbox 0.12.9 declares it on `ExecutionSession` only, not on the
- * `Sandbox` class `getSandbox()` returns. This is a deliberate cast for that type gap, not a
- * preview API.
- *
- * ponytail: ceiling is the SDK's own declaration. Delete this and the cast when `Sandbox` declares
- * `terminal`, and the call becomes ordinary.
+ * The container's work declaration, over Durable Object RPC. RPC carries no HTTP status, so the
+ * object answers with one and this turns it into a response.
  */
-type TerminalHost = {
-  terminal(request: Request, options?: PtyOptions): Promise<Response>;
-};
-
-function asTerminalHost(sandbox: Sandbox): TerminalHost {
-  return sandbox as unknown as TerminalHost;
+async function declareWork(request: Request, env: Env): Promise<Response> {
+  const body = await request.json().catch(() => null);
+  const result: WorkResult = await leaseFor(env).declareWork(body);
+  if (!result.ok) return Response.json({ [ERROR_FIELD]: result.error }, { status: result.status });
+  return Response.json({
+    [WORK_TOKEN_FIELD]: result.token,
+    [WORK_UNTIL_FIELD]: result.until,
+  });
 }
 
 export default {
@@ -156,13 +168,17 @@ export default {
       if (url.pathname === ROUTE_HEALTHZ) return health();
       // Connecting is the wake-up. A local client upgrades to a WebSocket here and the sandbox
       // starts on the way in; there is nothing else to start it.
-      if (url.pathname === ROUTE_TERMINAL && request.headers.get("Upgrade") === "websocket") {
-        return terminal(request, env, url.searchParams.get(SESSION_PARAM));
+      if (url.pathname === ROUTE_TERMINAL) {
+        if (request.headers.get("Upgrade")?.toLowerCase() !== WEBSOCKET_UPGRADE) {
+          return new Response("the terminal route needs a WebSocket upgrade", { status: 426 });
+        }
+        return await terminal(request, env);
       }
     }
 
-    if (request.method === METHOD_POST && url.pathname === ROUTE_RUN) {
-      return runCommand(request, env);
+    if (request.method === METHOD_POST) {
+      if (url.pathname === ROUTE_RUN) return await runCommand(request, env);
+      if (url.pathname === ROUTE_WORK) return await declareWork(request, env);
     }
 
     return new Response("not found", { status: 404 });

@@ -16,3 +16,9 @@ run = "mise install"
 [tasks.check]
 description = "Show what is installed and what is missing"
 run = "mise ls"
+
+# Node's own test runner, so the suite adds no dependency. It covers the two leases, which are pure
+# state machines in src/leases.ts; the sockets and the container are not reachable from here.
+[tasks.test]
+description = "Run the lease tests (Node's built-in test runner)"
+run = "node --test 'tests/**/*.test.mjs'"

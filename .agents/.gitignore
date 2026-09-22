@@ -1,0 +1,6 @@
+# Installed at container start by `bin/dsh-state.sh` via the Skills CLI, into this very directory
+# (the clone's .agents/ is the container's /root/.agents). Generated content, not source: it is
+# re-fetched from the sources in skills.json, so it is never committed. To add a skill for everyone,
+# add it to skills.json. To add one for yourself, just run `npx skills add <source> -g -y`.
+skills/
+.skill-lock.json

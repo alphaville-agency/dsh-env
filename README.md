@@ -34,15 +34,28 @@ Two things about that line are deliberate, and both are easy to get wrong:
 
 ```sh
 ./dsh.sh                 # a dsh terminal in the cloud, attached to this terminal
+./dsh.sh --takeover      # take the input lease from whoever holds it, and start typing
 ./dsh.sh uname -a        # one command, its output back here, exit code preserved
 ./dsh.sh 'git log -1'    # quoting works the same way
 ```
 
 `./dsh.sh` starts the container, attaches your terminal to the workspace over the Sandbox terminal
 WebSocket, and drops you into the `dsh` TUI. It **starts when you connect** and the container
-**shuts down 5 minutes after your last activity**; nothing runs while nobody is connected.
-[`docs/COST.md`](docs/COST.md) is the arithmetic, and explains why nothing in this repo is allowed to
-heartbeat.
+**sleeps 5 minutes after the last work stops**; [`docs/COST.md`](docs/COST.md) is the arithmetic, and
+explains why nothing in this repo is allowed to heartbeat.
+
+### One session, one pair of hands
+
+Open `./dsh.sh` in a second window and it attaches **live but read-only**: it shows the same output
+as it happens and says, on screen, that nothing you type is being sent and who holds the input
+lease. `./dsh.sh --takeover` takes the lease from whoever has it — they are told at once, on the
+spot, and drop to read-only. There is no silent state: a window either may type or tells you it may
+not, and a window that loses the lease mid-session says so immediately.
+
+The lease lives in a Durable Object, so it is genuinely one lease across every Worker isolate and
+region, and it survives hibernation. It is released the moment the holder disconnects cleanly, and
+lapses after ten minutes of silence if a client is killed rather than closed — so an abandoned
+session cannot lock everyone else out.
 
 Requires Node 22 or newer (for the built-in `WebSocket`) and, for the one-shot path, `jq` or
 `python3`. No `wrangler`, no `ssh`, no browser.
@@ -54,10 +67,16 @@ is still there for when you want one.
 
 ## The architecture, in one paragraph
 
-One Worker (`src/worker.ts`) fronts one Durable Object named `Sandbox` from `@cloudflare/sandbox`.
+One Worker (`src/worker.ts`) fronts two Durable Objects: `Sandbox` from `@cloudflare/sandbox`, and
+`DshLease`, which owns the input lease, the awake lease, and the one upstream terminal socket.
 **Every request is the wake-up**: `getSandbox()` starts a stopped container on the first `exec` or
 terminal call, and `sleepAfter: "5m"` stops it again after the last one — so there is no separate
-start step, and no keepalive anywhere. The image (`container.Dockerfile`) is
+start step, and no keepalive anywhere.
+
+The `DshLease` object is what makes read-only observers possible. It terminates the WebSocket
+upgrade rather than passing it through, holds a single socket to the container's PTY, and hands each
+client its own — so it can drop input from everyone except the lease holder while still forwarding
+every byte of output to all of them. The image (`container.Dockerfile`) is
 `docker.io/cloudflare/sandbox:0.12.9` plus the shell workspace toolchain; it runs no sshd and no
 health responder of its own, because the base image already carries the container runtime the
 platform talks to. `/workspace` and the rest of the filesystem are **ephemeral**; the durable part is
@@ -69,7 +88,8 @@ platform talks to. `/workspace` and the rest of the filesystem are **ephemeral**
 | `GET /` | a small JSON description of the service and its routes |
 | `GET /healthz` | liveness. Deliberately does not start the container |
 | `POST /run` | `{"command":"..."}` → `{stdout, stderr, exitCode, success}`; 400 if `command` is missing or not a string |
-| `GET /ws/terminal` | interactive terminal; requires a WebSocket upgrade |
+| `GET /ws/terminal` | interactive terminal; requires a WebSocket upgrade. `?client=<id>` names the client, `?takeover=1` takes the input lease |
+| `POST /work` | `{"action":"begin"}` → `{token, until}`, `{"action":"end","token":"..."}`. Declares work in progress so the container is not slept out from under it |
 
 Plus the SDK's own preview-URL proxy, which `proxyToSandbox()` answers first.
 
@@ -80,7 +100,10 @@ Plus the SDK's own preview-URL proxy, which `proxyToSandbox()` answers first.
 | `dsh.sh` | the entry point: terminal attach with no argument, one command with arguments |
 | `bin/dsh-client.mjs` | the local terminal client: raw-mode stdin ↔ the Sandbox terminal WebSocket |
 | `src/worker.ts` | the Worker: routes, the wake-up, the R2 binding mount |
+| `src/lease-do.ts` | the `DshLease` Durable Object: the two leases and the terminal fan-out |
+| `src/leases.ts` | both lease state machines, pure and testable with no Durable Object |
 | `src/names.ts` | every identifier this Worker uses, defined once |
+| `tests/leases.test.mjs` | the lease rules, run by Node's own test runner |
 | `container.Dockerfile` | the image: the official sandbox base plus the workspace toolchain |
 | `agent/` | the vendored agent configuration the image installs (instructions, rules, skills, profiles, ontology) |
 | `agent/sync.sh` | re-vendors `agent/` from the operator's laptop, scans it, and re-pins it |
@@ -91,12 +114,23 @@ Plus the SDK's own preview-URL proxy, which `proxyToSandbox()` answers first.
 ## Working on it
 
 ```sh
-npm ci               # install from the lockfile
-npm run typecheck    # wrangler types, then tsc --noEmit
-npm run deploy       # wrangler deploy (builds the image; Docker required)
+npm ci                          # install from the lockfile
+npm run typecheck               # wrangler types, then tsc --noEmit
+mise run test                   # node --test 'tests/**/*.test.mjs'
+npm run deploy                  # wrangler deploy (builds the image; Docker required)
 ```
 
+The tests cover the two leases, which are pure state machines in `src/leases.ts` — grant, refusal,
+takeover, supersession, TTL expiry, clean release, and the independence of "who may type" from "is
+work happening". They need no container, no Durable Object and no network.
+
 ## Two things worth knowing
+
+**Idle means no work in progress, not no keystrokes.** An agent working toward a goal with nobody
+attached is active and keeps the container awake, by declaring it with `POST /work`; an attached but
+abandoned window is idle and does not. Two messages per unit of work, never a ping — see
+`AGENTS.md`. A declaration whose `end` is never sent lapses after two hours rather than pinning the
+workspace awake.
 
 **Disk is ephemeral; git is not.** A sleeping container wakes with a fresh disk, so uncommitted work
 is lost. Commit and push to a branch as you go. `/mnt/state` survives, because it is an R2 mount

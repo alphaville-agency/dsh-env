@@ -1,0 +1,111 @@
+{
+  "manifestVersion": 1,
+  "description": "Which path in this container persists, and where. `bin/dsh-state.sh` provisions the environment by reading this file and nothing else: there is no path list in the script, so a path added here is provisioned on the next cold start with no code change. Paths are written with ${NAME} references, substituted by the script from the small set of names it defines (STATE_MOUNT, WORKSPACE, HOME, REPO_DIR, CLONE_DSH, CLONE_AGENTS, HARNESS_HOME, AGENTS_HOME, REPOS_DIR, WORKTREES_DIR).",
+
+  "backends": [
+    {
+      "name": "ephemeral",
+      "durable": false,
+      "what": "The image filesystem plus container-local disk. Fast, and gone the moment the container stops.",
+      "useFor": "Scratch: throwaway clones, build output, temp files. Nothing here may be the only copy of anything."
+    },
+    {
+      "name": "r2",
+      "durable": true,
+      "what": "The credential-less R2 binding mount (binding STATE, bucket af-dev-tooling-dsh) at /mnt/state. It is an s3fs FUSE mount, so it is much slower than local disk.",
+      "useFor": "Anything that must survive a wake: installed skills, repositories, git worktrees and uncommitted work.",
+      "ceiling": "The SDK mounts it with stat_cache_expire=60, enable_noobj_cache and multipart_size=5, and without use_cache, so file CONTENTS are never cached locally: every read and write is a round trip to R2. Stat results are cached for 60 seconds, which is what makes a repeated `git status` cheap and a first one expensive. Adding use_cache=/tmp/... to the mount options is the identified upgrade path for git-heavy work; it is not enabled because it is unverified without a container and it trades container disk for speed. See README.md, 'What survives a wake'."
+    },
+    {
+      "name": "git",
+      "durable": true,
+      "what": "A working tree of a repository. Durable because the repository is durable, not because the container is.",
+      "useFor": "The harness configuration and everything the agent authors. Editable in place inside the container, reviewable and pushable back through normal git."
+    },
+    {
+      "name": "volume",
+      "available": false,
+      "durable": false,
+      "what": "DOES NOT EXIST ON THIS PLATFORM. Listed so that nobody adds it back: Cloudflare Containers provide no persistent block device, so there is no volume backend to select, and no amount of manifest editing creates one. Durability here comes from R2 and from git, and from nothing else."
+    }
+  ],
+
+  "paths": [
+    {
+      "path": "${STATE_MOUNT}",
+      "backend": "r2",
+      "role": "mount-root",
+      "provision": "verify-dir",
+      "note": "Mounted by the Worker (mountBucket) before this script runs, because a mount does not survive the container being recreated."
+    },
+    {
+      "path": "${REPO_DIR}",
+      "backend": "git",
+      "role": "source",
+      "provision": "clone",
+      "note": "The clone of the tooling repository. This is the source of truth for the harness config and for the skill manifest, and it is the working tree an agent edits and commits in."
+    },
+    {
+      "path": "${HARNESS_HOME}",
+      "backend": "git",
+      "role": "source",
+      "provision": "link-from-clone",
+      "source": "${CLONE_DSH}",
+      "except": ["profiles"],
+      "exceptReason": "profiles/ is the harness's own runtime, not agent state: dsh loads the TUI from ${HARNESS_HOME}/profiles, and its node_modules tree has to be on local disk because a Node require() tree over s3fs is a network round trip per file. It is installed into the image at build time. Every other entry of the clone's .dsh/ - AGENTS.md, MODEL-ROLES.md, settings.yaml, rules/, ontology/ - is symlinked, so a file added to the repository later arrives with no change here."
+    },
+    {
+      "path": "${HARNESS_HOME}/profiles",
+      "backend": "ephemeral",
+      "role": "runtime",
+      "provision": "verify-dir",
+      "required": true,
+      "note": "Supplied by the image, not by the clone. Source: .dsh/profiles in the repository, installed by container.Dockerfile."
+    },
+    {
+      "path": "${HOME}/.agents/skills",
+      "backend": "r2",
+      "role": "cache",
+      "provision": "skills-cli",
+      "manifest": "${CLONE_AGENTS}/skills.json",
+      "note": "A DERIVED CACHE, not a source of truth: every entry can be regenerated from the manifest with `npx skills`. It is durable because re-fetching the catalog on every wake would put a network round trip on the critical path of the operator connecting. This path is inside the clone (.agents/ maps 1:1), so an agent can also commit a skill deliberately."
+    },
+    {
+      "path": "${WORKSPACE}",
+      "backend": "ephemeral",
+      "role": "scratch",
+      "provision": "mkdir",
+      "note": "Scratch. Disposable by design; never the only copy of anything."
+    },
+    {
+      "path": "${REPOS_DIR}",
+      "backend": "r2",
+      "role": "source",
+      "provision": "mkdir",
+      "note": "WHERE ACTUAL WORK LIVES: clones of the repositories being worked on, with their git history, their uncommitted changes and their worktrees."
+    },
+    {
+      "path": "${WORKTREES_DIR}",
+      "backend": "r2",
+      "role": "source",
+      "provision": "mkdir",
+      "note": "The worktree parent. GitButler is gone; `git worktree` is the isolation mechanism, so this has to be durable or worktrees are pointless. One worktree per parallel stream, named for the stream: ${WORKTREES_DIR}/<stream>."
+    },
+    {
+      "path": "${WORKSPACE}/repos",
+      "backend": "r2",
+      "role": "source",
+      "provision": "symlink",
+      "target": "${REPOS_DIR}",
+      "note": "The short, discoverable name for the same durable directory. A symlink rather than a second location: two paths to one tree is how a change gets made in the wrong one."
+    },
+    {
+      "path": "${WORKSPACE}/worktrees",
+      "backend": "r2",
+      "role": "source",
+      "provision": "symlink",
+      "target": "${WORKTREES_DIR}",
+      "note": "As above, for the worktree parent. The symlink itself is on ephemeral disk and is recreated on each cold start; the directory it points at is not."
+    }
+  ]
+}
