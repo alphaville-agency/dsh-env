@@ -38,3 +38,23 @@ RUN apt-get update \
       git curl jq ca-certificates \
  && apt-get clean \
  && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+
+# The harness itself, which is the entire point of this environment: without it the container is a
+# shell in the cloud rather than a place to work.
+#
+# Pinned to an exact version rather than a tag. `latest` on this package currently resolves to
+# 0.1.5-rc.2, while the `next` tag is 0.1.5-rc.3 - and rc.3 is the one whose dependency tree is
+# broken, so an unpinned install is a coin flip that changes without warning. The version installed
+# here is the one the terminal runs, so it is part of the interface, not an implementation detail.
+#
+# The npm cache is purged in the SAME RUN that fills it. A later `rm -rf` would reclaim nothing:
+# Docker layers are additive and those bytes would stay in this layer forever. That mistake cost
+# 108 MB once already and tests/dockerfile.test.mjs now pins the pattern.
+ARG DSH_HARNESS_VERSION=0.1.5-rc.2
+RUN npm install --global "@deepseek-ai/dsh@${DSH_HARNESS_VERSION}" \
+ && npm cache clean --force \
+ && rm -rf /root/.npm
+
+# Prove the binary is on PATH at build time. An image that builds and then cannot run its own
+# harness is the failure this environment has spent the longest on, and it is cheap to catch here.
+RUN command -v dsh && dsh --version

@@ -60,6 +60,25 @@ export const ROUTE_TERMINAL = "/ws/terminal";
 export const ROUTE_ROOT = "/";
 
 /**
+ * What the terminal starts as, and the query parameter that may change it.
+ *
+ * The PTY is started with this program rather than opening a shell and then typing a command into
+ * it. Typing is the wrong shape for a session that survives a disconnect: the SDK keeps the PTY
+ * alive and replays its output on reconnect, so an injected `dsh` would be typed into an already
+ * running TUI - which is worse than useless, and would depend on the client guessing whether the
+ * terminal it is attaching to is new. `PtyOptions.shell` is passed to the container when the PTY is
+ * created, so reconnecting attaches to the same process with nothing sent.
+ *
+ * The value is checked against an allowlist instead of being passed through. It reaches the
+ * container as the program to run, so an unvalidated value is a command, and "the caller is already
+ * authenticated" is not a reason to hand it one - the authenticated caller is a terminal client, not
+ * a shell.
+ */
+export const SHELL_PARAM = "shell";
+export const TERMINAL_SHELL_DEFAULT = "dsh";
+export const TERMINAL_SHELL_ALLOWED = ["dsh", "bash", "sh"];
+
+/**
  * The environment variable holding the shared bearer token, and the prefix it arrives behind.
  *
  * Declared as a Worker SECRET (never in `wrangler.jsonc`, never committed, never baked into the
