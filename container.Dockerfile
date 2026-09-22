@@ -10,7 +10,7 @@
 FROM alpine:3.20
 
 RUN apk add --no-cache \
-      openssh openssh-server-pam rclone \
+      openssh rclone \
       git curl jq ripgrep less tmux \
       python3 py3-pip nodejs npm
 

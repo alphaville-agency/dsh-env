@@ -1,16 +1,23 @@
 #!/bin/sh
-# Four jobs: the session, the health responder the platform requires, state persistence, and
-# shutting down when nobody is working.
+# Logs every step, and does not die with a component. A container that exits silently cannot be
+# diagnosed from outside - that lesson has been learned twice on this project already.
 set -u
-
-IDLE_TIMEOUT="${DSH_IDLE_TIMEOUT:-1800}"   # 30 minutes without terminal activity
-STATE_REMOTE="${DSH_STATE_REMOTE:-}"       # r2:alphaville-dsh/state, if configured
 export HOME=/root
+IDLE_TIMEOUT="${DSH_IDLE_TIMEOUT:-1800}"
 
+log() { echo "[dsh] $*"; }
+
+log "starting"
 mkdir -p /run/sshd
-/usr/sbin/sshd -D -e &
-SSHD=$!
 
+# Host keys: Alpine ships none, and sshd exits without them.
+if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
+    log "generating host keys"
+    ssh-keygen -A || log "host key generation failed"
+fi
+
+# The HTTP responder the platform health-checks. Started first so the check can pass even while the
+# shell is still coming up.
 python3 - <<'PY' &
 import http.server, socketserver
 class H(http.server.BaseHTTPRequestHandler):
@@ -25,31 +32,38 @@ socketserver.TCPServer.allow_reuse_address = True
 socketserver.TCPServer(("", 8080), H).serve_forever()
 PY
 HEALTH=$!
+log "health responder on 8080 (pid $HEALTH)"
 
-# The harness state is what makes this workspace ours rather than a fresh box: sessions, history,
-# config, workspace list. It is small text, so it syncs cheaply to R2 and back.
-# Build the object-store remote from the environment. Credentials arrive as Worker secrets passed at
-# start, never baked into the image or committed - a secret in a repository is the defect this
-# project keeps finding.
-if [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_ENDPOINT:-}" ]; then
-    export RCLONE_CONFIG_R2_TYPE=s3
-    export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
-    export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
-    export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
-    export RCLONE_CONFIG_R2_ENDPOINT="$R2_ENDPOINT"
-    STATE_REMOTE="${STATE_REMOTE:-r2:dsh-state/home}"
+# sshd in the foreground of its own process; its failure must not kill the container, or the reason
+# is lost with it.
+/usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &
+SSHD=$!
+sleep 3
+if kill -0 "$SSHD" 2>/dev/null; then
+    log "sshd listening on 22 (pid $SSHD)"
+else
+    log "sshd FAILED; last output: $(tail -3 /tmp/sshd.log 2>/dev/null | tr '\n' ' ')"
 fi
 
-if [ -n "$STATE_REMOTE" ] && command -v rclone >/dev/null 2>&1; then
-    echo "restoring state from $STATE_REMOTE"
-    rclone sync "$STATE_REMOTE" /root --create-empty-src-dirs --quiet --exclude ".cache/**" --exclude "tmp/**" || \
-        echo "state restore failed; starting fresh"
+# State persistence. Container disk is ephemeral; the harness's sessions, dotfiles and installed
+# tools are not disposable.
+if [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ]; then
+    export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+    export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+    export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+    export RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT:-}"
+    STATE_REMOTE="${DSH_STATE_REMOTE:-r2:af-dev-tooling-dsh/home}"
+    log "restoring state from $STATE_REMOTE"
+    rclone sync "$STATE_REMOTE" /root --create-empty-src-dirs --quiet \
+        --exclude ".cache/**" --exclude "tmp/**" 2>/dev/null || log "no state to restore"
+else
+    STATE_REMOTE=""
+    log "no object-store credentials; state will not persist"
 fi
 
 save_state() {
     [ -n "$STATE_REMOTE" ] || return 0
-    command -v rclone >/dev/null 2>&1 || return 0
-    rclone sync /root "$STATE_REMOTE" --quiet --exclude ".cache/**" --exclude "tmp/**" || echo "state save failed"
+    rclone sync /root "$STATE_REMOTE" --quiet --exclude ".cache/**" --exclude "tmp/**" 2>/dev/null || true
 }
 
 terminal_idle_seconds() {
@@ -70,11 +84,8 @@ poll() {
             idle=$(terminal_idle_seconds)
             if [ "$idle" -lt "$IDLE_TIMEOUT" ]; then
                 [ -n "${WORKER_HEALTH_URL:-}" ] && curl -fsS -m 10 "$WORKER_HEALTH_URL" >/dev/null 2>&1
-                # Checkpoint state periodically: the sleep is unannounced, so saving only at the end
-                # would lose the last stretch of work.
                 [ $((idle % 300)) -lt 60 ] && save_state
             else
-                # Idle past the timeout: persist and stop renewing, so sleepAfter shuts us down.
                 save_state
             fi
         fi
@@ -82,6 +93,10 @@ poll() {
 }
 poll &
 
-# Persist on the way out, whatever the reason.
-trap 'save_state; kill $SSHD $HEALTH 2>/dev/null' EXIT INT TERM
-wait "$SSHD"
+trap 'log "stopping"; save_state' EXIT INT TERM
+
+# Stay alive regardless of what any single component does.
+while :; do
+    sleep 3600
+    if ! kill -0 "$HEALTH" 2>/dev/null; then log "health responder died; restarting"; fi
+done
