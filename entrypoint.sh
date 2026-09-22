@@ -20,9 +20,10 @@ python3 /work/keepalive.py &
 
 # 2. Join the tailnet. Failure is reported, not fatal.
 TAILNET_IP=127.0.0.1
-if command -v tailscale >/dev/null 2>&1 && [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+TS_KEY="${TAILSCALE_AUTHKEY:-${TAILSCALE_OAUTH_CLIENT_SECRET:-}}"
+if command -v tailscale >/dev/null 2>&1 && [ -n "$TS_KEY" ]; then
     echo "joining tailnet as ${TS_NAME}..."
-    if tailscale up --auth-key="$TAILSCALE_OAUTH_CLIENT_SECRET" \
+    if tailscale up --auth-key="$TS_KEY" \
                     --hostname="$TS_NAME" --ephemeral --accept-routes; then
         TAILNET_IP="$(tailscale ip -4 | head -1)"
         echo "tailnet address: ${TAILNET_IP}"
