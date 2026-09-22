@@ -13,7 +13,6 @@
 // Everything else the design had - the lease Durable Object, the R2 mount and the provisioner, the
 // terminal, the skills installer - is parked on the `archive/pre-floor-design` branch. Each comes
 // back one layer at a time, each verified, or it does not come back.
-import { getSandbox, type Sandbox, type SandboxOptions } from "@cloudflare/sandbox";
 import {
   COMMAND_FIELD,
   ERROR_FIELD,
@@ -23,15 +22,19 @@ import {
   MOUNT_ERROR_FIELD,
   OK_FIELD,
   ROUTE_HEALTHZ,
+  ROUTE_ROOT,
   ROUTE_RUN,
+  ROUTE_TERMINAL,
+  S3FS_MOUNT_OPTIONS,
   SANDBOX_ID,
   SERVICE_FIELD,
   SERVICE_NAME,
-  S3FS_MOUNT_OPTIONS,
   SLEEP_AFTER,
   STATE_BINDING,
   STATE_MOUNT_PATH,
+  WEBSOCKET_UPGRADE,
 } from "./names";
+import { getSandbox, type Sandbox, type SandboxOptions } from "@cloudflare/sandbox";
 
 // wrangler finds a Durable Object class by its export, and `Sandbox` is the SDK's own class.
 //
@@ -124,13 +127,40 @@ function health(): Response {
   return Response.json({ [OK_FIELD]: true, [SERVICE_FIELD]: SERVICE_NAME });
 }
 
+/**
+ * What this Worker answers, so the surface is discoverable without reading the source. Deliberately
+ * does not touch the sandbox: describing the service must never wake a stopped container.
+ */
+function describe(): Response {
+  return Response.json({
+    [SERVICE_FIELD]: SERVICE_NAME,
+    routes: [
+      { route: ROUTE_ROOT, method: METHOD_GET, description: "this description" },
+      { route: ROUTE_HEALTHZ, method: METHOD_GET, description: "liveness; does not wake the sandbox" },
+      { route: ROUTE_RUN, method: METHOD_POST, description: `one command, as {"${COMMAND_FIELD}": "..."}` },
+      { route: ROUTE_TERMINAL, method: METHOD_GET, description: "interactive terminal; needs a WebSocket upgrade" },
+    ],
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
+    if (request.method === METHOD_GET && url.pathname === ROUTE_ROOT) return describe();
     if (request.method === METHOD_GET && url.pathname === ROUTE_HEALTHZ) return health();
     if (request.method === METHOD_POST && url.pathname === ROUTE_RUN) {
       return await runCommand(request, env);
+    }
+
+    if (url.pathname === ROUTE_TERMINAL) {
+      if (request.headers.get("Upgrade")?.toLowerCase() !== WEBSOCKET_UPGRADE) {
+        return new Response("the terminal route needs a WebSocket upgrade", { status: 426 });
+      }
+      // The SDK owns this. `sandbox.terminal(request)` proxies the upgrade straight to the
+      // container's PTY, with sizing, output buffering and reconnect handling maintained by the
+      // people who own the runtime. Connecting is also the wake-up, so there is no start step.
+      return await sandboxFor(env).terminal(request);
     }
 
     return new Response("not found", { status: 404 });

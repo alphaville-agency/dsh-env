@@ -32,6 +32,21 @@ export const SLEEP_AFTER = "5m";
 export const ROUTE_HEALTHZ = "/healthz";
 export const ROUTE_RUN = "/run";
 
+export const ROUTE_ROOT = "/";
+
+/**
+ * The interactive terminal. A WebSocket upgrade here is proxied straight to the container PTY by
+ * the SDK - `sandbox.terminal(request)` is the whole implementation, and deliberately so: it is the
+ * platform's own mechanism, already handles PTY sizing, output buffering and reconnection, and is
+ * maintained by the people who own the container runtime. The lease Durable Object that used to sit
+ * here existed only to arbitrate between several simultaneous clients; with one operator there is
+ * nothing to arbitrate, so it is gone.
+ */
+export const ROUTE_TERMINAL = "/ws/terminal";
+
+/** The one protocol token we compare against; WebSocket upgrades are fixed by spec. */
+export const WEBSOCKET_UPGRADE = "websocket";
+
 /**
  * The R2 binding the durable state is mounted from, and where it lands in the container.
  *
