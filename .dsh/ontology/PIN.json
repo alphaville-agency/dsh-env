@@ -2,17 +2,17 @@
   "source_repo": "alphaville-agency/agency",
   "derived_from": "names/",
   "source_path": "https://github.com/alphaville-agency/agency/tree/main/names",
-  "pinned_at": "2026-09-22T06:02:11Z",
+  "pinned_at": "2026-09-22T08:37:25Z",
   "files": {
-    "registry.json": "3dbfbfa45baa56d3e259756441dacd9422bf0a6a4d88a925a3ec84a7ca6950c3",
-    "validate.py": "b6b7577675ac176991a0bdababa02018ae7899a8d0eadef205fd74a85e198b21"
+    "registry.json": "7276762701e08990632b253d0cc07109d223df90786749614005eab7038faff4",
+    "validate.py": "31e47f3a2de5564b9d0312fc9fe827af7438f35397ac9cdec8053eb889fb3a0a"
   },
-  "known_stale": {
-    "recorded_at": "2026-09-22T18:20:00Z",
-    "canonical_is_ahead": true,
-    "why": "Nothing in this repository re-pins these two files any more. The hand-rolled re-pinner was `tools/sync.sh`, which has been deleted: it read from a laptop directory that does not exist (`$HOME/Projects/agency/names`) and named a source repository that does not exist (`alphaville-agency/capability`, which 404s). `tools/check-drift.sh` can only RE-VERIFY a pin; it never refreshes one.",
-    "what_it_means": "The hashes above are of the copy this repository carries, so they still prove the copy has not been hand-edited. They do NOT claim the copy is current. The canonical `alphaville-agency/agency/names/` has moved on: upstream is now schema `alphaville.resource-names.v1` while this copy is `v2`, and they differ substantially - upstream has no `claims`, `vocabularies`, `singletons`, `uniqueness` or `exceptions` sections and no `infrastructure` system term, and its `validate.py` is a CLI for rendering and checking names rather than the claims auditor this copy carries. Which of the two is the intended canonical is a decision for the operator; it is NOT assumed here.",
-    "how_to_refresh": "Copy `names/registry.json` and `names/validate.py` from `alphaville-agency/agency` at a chosen commit into `.dsh/ontology/`, write their sha256 into `files` above, set `pinned_at`, and clear this block. There is no script for it: it is a deliberate, reviewed copy of two files, which is cheaper to do by hand than to automate."
+  "history": {
+    "status": "a plain revision of the canonical copy again",
+    "was": "This copy was locally forked and was NOT a revision of upstream. It carried schema v2 - claims, vocabularies, singletons, uniqueness, exceptions and the `infrastructure` system term - while upstream was v1 at roughly a third the size with none of them, and it had been renamed in place from dev.tooling.dsh.shell to shared.tooling.dsh.shell.",
+    "resolution": "RESOLVED 2026-09-22 by landing v2 in the canonical repository instead of falling back to it: names/registry.json and names/validate.py in alphaville-agency/agency now carry v2 (commit 5522963, local to that working tree and NOT yet pushed), and this copy was replaced by those two files byte for byte. The hashes above are the proof - they are the hashes of the canonical files as they stand.",
+    "one_thing_left": "The canonical commit is local. Until it is pushed, a fresh clone of alphaville-agency/agency still has v1 and this pin names a revision that exists on one machine. Pushing is deliberately not done from here: that repository had unrelated uncommitted work in flight, and publishing over it is the other writer's call."
   },
-  "rule": "This is a derived, read-only copy of the canonical registry in `alphaville-agency/agency` under `names/`. Edit the canonical copy there and re-copy; a local edit here is drift and `tools/check-drift.sh` will fail. `Check-drift.sh` verifies the pin recorded above, and classifies a mismatch against `CANONICAL_NAMES_DIR` when that directory is reachable."
+  "checked_by": "tests/ontology-pin.test.mjs, which VERIFIES these hashes and deliberately does not refresh them. Refreshing automatically would defeat the purpose: the value of a pin is that something consciously re-derives it after a deliberate change. tools/sync.sh re-pinned and tools/check-drift.sh re-verified before; both were deleted as pre-APM dead code, and this test is their replacement.",
+  "rule": "This is a derived, read-only copy of the canonical registry in alphaville-agency/agency (names/registry.json and names/validate.py). Edit the canonical copy and copy it here; a local edit is drift, and the hashes above are what the drift check compares against."
 }

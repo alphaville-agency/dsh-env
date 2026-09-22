@@ -6,7 +6,8 @@
     "env": [
       "dev",
       "stg",
-      "prod"
+      "prod",
+      "shared"
     ],
     "system": [
       "agency",
@@ -43,6 +44,16 @@
       "gateway"
     ]
   },
+  "level_terms": {
+    "rule": "A level term is defined here once, beside the level it belongs to, so no term is explained only in prose somewhere else. `system` is the top-level operational scope; a term appearing in two levels is a defect, because then one word means two things.",
+    "env": {
+      "dev": "A tier of a system that IS deployed per environment: the lowest tier, where work lands first.",
+      "stg": "A tier of a system that IS deployed per environment: the middle tier, which exists to be rehearsed against before prod.",
+      "prod": "A tier of a system that IS deployed per environment: the top tier, the one real users use.",
+      "shared": "NOT deployed per environment; one instance serves every environment. `system` is what makes a resource a development environment, not `env`: the agency's dev, stg and prod work all share one developer environment, so there is exactly one of it and `env` only records that it is not tiered. `shared` is not a fourth tier and is never a synonym for prod."
+    },
+    "env_sibling_rule": "`dev`, `stg` and `prod` are siblings of one another: naming one asserts the existence of the others, so a singleton that is stamped `dev` claims a `stg` and a bare-tier variant that will never exist. `shared` has no siblings, which is the point of the term."
+  },
   "namespaces": {
     "platform": "alphaville-agency",
     "artifact": "alphaville-artifact",
@@ -78,9 +89,13 @@
     },
     "hostname": {
       "template": "{component}.alphaville.space",
-      "template_nonprod": "{env}-{component}.alphaville.space",
+      "template_prefixed": "{env}-{component}.alphaville.space",
+      "prefixed_envs": [
+        "dev",
+        "stg"
+      ],
       "pattern": "^[a-z0-9-]{1,63}(\\.[a-z0-9-]{1,63})+$",
-      "note": "prod owns the bare label; every other env is prefixed so two logical IDs cannot claim one hostname"
+      "note": "The bare label is owned by whichever env is NOT subordinate to another env of the same system; every env that has siblings above or beside it is prefixed, so two logical IDs cannot claim one hostname. `prod` takes the bare label because it is the top tier of a tiered system - a consequence of the rule, not an exception to it - and `shared` takes it because it is not tiered at all: prefixing a singleton would re-assert the existence of the `dev`/`stg`/`prod` siblings that `shared` exists to deny. `prefixed_envs` is the machine-readable half of this note, and the two are checked against each other by names/validate.py: every env term is either in `prefixed_envs` or owns the bare label."
     },
     "r2_bucket": {
       "template": "af-{env}-{system}-{component}",
@@ -102,7 +117,37 @@
     "env_prefix": {
       "template": "AF_{env}_{system}_{component}_{role}",
       "case": "upper"
+    },
+    "cloudflare_container_app": {
+      "template": "{env}-{system}-{component}-{role}-container",
+      "pattern": "^[a-z0-9-]{3,63}$",
+      "note": "A DECLARED name, and it took an explicit `name` in the Worker's containers[] entry to make it one. Left unset, the platform derives the application name as `<worker-name>-<lowercased class name>`, which is how this resource was called `dev-tooling-dsh-shell-sandbox`: the suffix came from the Sandbox SDK's class, not from us, so the name carried an SDK implementation detail and would have changed silently if that class were ever renamed. The template keeps the logical ID's `role` - it is the container application OF that role, not a role of its own - and appends `container` as the resource kind, because the registry's uniqueness rule is global across platforms and the Worker already renders the same base name. See declaredness.derived for what could not be owned."
     }
+  },
+  "declaredness": {
+    "rule": "A provider name is DECLARED when we choose it, so the serialisation is a decision this registry can be held to; it is DERIVED when a platform generates it from something this registry does not control, so the name is an observation rather than a decision. A derived name must be read back from the platform after provisioning and never inferred, because it can change without one character of this repository changing. A name a platform generates from someone else's class name is the sharpest case of that: nothing of ours appears in it at all.",
+    "declared": [
+      "cloudflare_worker",
+      "cloudflare_ai_gateway",
+      "cloudflare_container_app",
+      "hostname",
+      "r2_bucket",
+      "hf_dataset",
+      "github_repo",
+      "image",
+      "env_prefix"
+    ],
+    "derived": [
+      {
+        "resource": "cloudflare_container_image",
+        "observed": "shared-tooling-dsh-shell-container:7f1f429c",
+        "derivation": "the Cloudflare managed registry names the image REPOSITORY after the container application, and the TAG after the Worker's deploy version, which is generated per deploy and has no logical ID to render from.",
+        "consequence": "the tag is not a name we own and not a name this registry can pin. The repository is ours only because the application name is ours, so it is derived-from-declared, and it is the reason `wrangler containers images list` has to be read rather than predicted.",
+        "evidence": "wrangler containers images list, run in the tooling repository on 2026-09-22"
+      }
+    ],
+    "history": "Before `containers[].name` was set, the application AND its image repository were both derived as `<worker>-<lowercased class name>`, which is how this resource was called dev-tooling-dsh-shell-sandbox. The suffix came from the Sandbox SDK's class, not from us. That is recorded here rather than in a commit message because the derivation is a property of the platform, not of one deploy.",
+    "enforced_by": "names/validate.py --claims, which refuses a serialisation that is absent from `declared`"
   },
   "worked_example": {
     "logical_id": "prod.agency.console.api",
@@ -110,8 +155,8 @@
       "cloudflare_worker": "prod-agency-console-api",
       "hostname": "console.alphaville.space",
       "r2_bucket": "af-prod-agency-console",
-      "github_repo": "alphaville-foundry/agency",
-      "image": "ghcr.io/alphaville-foundry/agency-console-api",
+      "github_repo": "alphaville-agency/agency",
+      "image": "alphaville-agency/agency-console-api",
       "env_prefix": "AF_PROD_AGENCY_CONSOLE_API"
     }
   },
@@ -123,6 +168,12 @@
         "name": "cheapinference",
         "upstream_base_url": "https://api.cheaperinference.com",
         "reason": "AI Gateway custom-provider slug. It names the upstream provider, not an Alphaville resource, so it carries the provider's own identity and deliberately has no env prefix: one slug serves every gateway on the account."
+      },
+      {
+        "resource": "cloudflare_secrets_store",
+        "name": "alphaville",
+        "provider_ref": "c0db37e405804f0eafe43cfb1bc2bff4",
+        "reason": "The account's single Secrets Store. It is account-scoped and serves every environment, so it carries no env prefix and does not render from a logical id: it is the one place secrets live, which is the point of using it rather than scattering per-Worker secrets."
       }
     ]
   },
@@ -189,18 +240,24 @@
         "logical_id": "shared.tooling.dsh.shell",
         "provider_names": {
           "cloudflare_worker": "shared-tooling-dsh-shell",
+          "cloudflare_container_app": "shared-tooling-dsh-shell-container",
           "hostname": "dsh.alphaville.space",
           "r2_bucket": "af-shared-tooling-dsh"
         },
         "owner": "alphaville@agentmail.to",
         "contact": "dev@alphaville.space",
-        "purpose": "Runs the cloud developer environment: the workspace an agent or the operator works in, which may disappear at any moment and which nothing in production may depend on.",
+        "purpose": "Runs the cloud developer environment: the workspace an agent or the operator works in, which may disappear at any moment and which nothing in production may depend on. `system=tooling` is what makes it a development environment and `env=shared` records that it is not tiered - there is one, and it serves every environment. It replaced dev.tooling.dsh.shell, which is recorded as retired.",
         "lifecycle": "active",
         "locations": [
           {
             "provider": "cloudflare",
             "namespace": "alphaville-agency",
             "provider_ref": "workers/shared-tooling-dsh-shell"
+          },
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "containers/shared-tooling-dsh-shell-container"
           },
           {
             "provider": "cloudflare",
@@ -217,10 +274,10 @@
         "provisioning": [
           {
             "action": "created",
-            "occurred_at": "2026-09-22T13:45:24+10:00",
+            "occurred_at": "2026-09-22T08:28:50Z",
             "actor": "alphaville@agentmail.to",
             "actor_kind": "agent",
-            "means": "cli",
+            "means": "iac",
             "evidence": [
               "evidence/provisioning/shared-tooling-dsh-shell.json"
             ]
@@ -235,13 +292,70 @@
         "no_consumers_reason": null
       },
       {
+        "logical_id": "dev.tooling.dsh.shell",
+        "provider_names": {
+          "cloudflare_worker": "dev-tooling-dsh-shell",
+          "hostname": "dev-dsh.alphaville.space",
+          "r2_bucket": "af-dev-tooling-dsh"
+        },
+        "owner": "alphaville@agentmail.to",
+        "contact": "dev@alphaville.space",
+        "purpose": "Runs the cloud developer environment: the workspace an agent or the operator works in, which may disappear at any moment and which nothing in production may depend on.",
+        "lifecycle": "retired",
+        "locations": [
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "workers/dev-tooling-dsh-shell"
+          },
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "r2/af-dev-tooling-dsh"
+          },
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "dns/dev-dsh.alphaville.space"
+          }
+        ],
+        "source_ref": "registry:dev.tooling.dsh.shell",
+        "provisioning": [
+          {
+            "action": "created",
+            "occurred_at": "2026-09-22T13:45:24+10:00",
+            "actor": "alphaville@agentmail.to",
+            "actor_kind": "agent",
+            "means": "cli",
+            "evidence": [
+              "evidence/provisioning/dev-tooling-dsh-shell.json"
+            ]
+          },
+          {
+            "action": "deleted",
+            "occurred_at": "2026-09-22T18:35:00+10:00",
+            "actor": "alphaville@agentmail.to",
+            "actor_kind": "agent",
+            "means": "cli",
+            "evidence": [
+              "evidence/provisioning/dev-tooling-dsh-shell-deletion.json"
+            ]
+          }
+        ],
+        "consumers": null,
+        "no_consumers_reason": {
+          "code": "retired",
+          "detail": "RETIRED 2026-09-22. Renamed to shared.tooling.dsh.shell: `dev` stamped a tier on a singleton and asserted a stg and a bare-tier sibling that do not and will not exist. The Worker, the container application, its images, the route and the R2 bucket were all deleted under these names before anything was rebuilt, so these names are reserved by nothing."
+        }
+      },
+      {
         "logical_id": "shared.tooling.dsh.gateway",
         "provider_names": {
           "cloudflare_ai_gateway": "shared-tooling-dsh-gateway"
         },
         "owner": "alphaville@agentmail.to",
         "contact": "dev@alphaville.space",
-        "purpose": "Routes the dev environment's model calls to the cheapinference custom provider, so model traffic from the developer workspace has one named route.",
+        "purpose": "The developer environment's model route, so model traffic from the workspace has one named gateway. Tooling is not tiered either, so this carries `shared` for the same reason its consumer does.",
         "lifecycle": "active",
         "locations": [
           {
@@ -254,7 +368,7 @@
         "provisioning": [
           {
             "action": "created",
-            "occurred_at": "2026-09-22T15:33:27+10:00",
+            "occurred_at": "2026-09-22T08:25:44Z",
             "actor": "alphaville@agentmail.to",
             "actor_kind": "agent",
             "means": "api",
@@ -270,6 +384,51 @@
           }
         ],
         "no_consumers_reason": null
+      },
+      {
+        "logical_id": "dev.tooling.dsh.gateway",
+        "provider_names": {
+          "cloudflare_ai_gateway": "dev-tooling-dsh-gateway"
+        },
+        "owner": "alphaville@agentmail.to",
+        "contact": "dev@alphaville.space",
+        "purpose": "Routes the dev environment's model calls to the cheapinference custom provider, so model traffic from the developer workspace has one named route.",
+        "lifecycle": "retired",
+        "locations": [
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "ai-gateway/dev-tooling-dsh-gateway"
+          }
+        ],
+        "source_ref": "registry:dev.tooling.dsh.gateway",
+        "provisioning": [
+          {
+            "action": "created",
+            "occurred_at": "2026-09-22T15:33:27+10:00",
+            "actor": "alphaville@agentmail.to",
+            "actor_kind": "agent",
+            "means": "api",
+            "evidence": [
+              "evidence/provisioning/dev-tooling-dsh-gateway.json"
+            ]
+          },
+          {
+            "action": "deleted",
+            "occurred_at": "2026-09-22T18:35:00+10:00",
+            "actor": "alphaville@agentmail.to",
+            "actor_kind": "agent",
+            "means": "api",
+            "evidence": [
+              "evidence/provisioning/dev-tooling-dsh-gateway-deletion.json"
+            ]
+          }
+        ],
+        "consumers": null,
+        "no_consumers_reason": {
+          "code": "retired",
+          "detail": "RETIRED 2026-09-22. Renamed to shared.tooling.dsh.gateway for the same reason as the Worker it served, and deleted as an orphan: its only intended consumer was the dev-named Worker, which no longer exists."
+        }
       },
       {
         "logical_id": "dev.agency.inference.gateway",

@@ -29,6 +29,7 @@ REPO_ROOT = REGISTRY.parent.parent
 PLATFORMS = (
     "cloudflare_worker",
     "cloudflare_ai_gateway",
+    "cloudflare_container_app",
     "hostname",
     "r2_bucket",
     "hf_dataset",
@@ -39,8 +40,9 @@ PLATFORMS = (
 
 LEVELS = ("env", "system", "component", "role")
 SYSTEM_LEVEL = "system"
-ENV_PROD = "prod"
 HOSTNAME = "hostname"
+DECLAREDNESS_KEY = "declaredness"
+DECLARED_KEY = "declared"
 
 SCHEMA_KEY = "schema"
 STATEMENT_KEY = "statement"
@@ -83,7 +85,8 @@ SINGLETON_RESOURCE_KEY = "resource"
 SINGLETON_NAME_KEY = "name"
 SINGLETON_REASON_KEY = "reason"
 TEMPLATE_KEY = "template"
-TEMPLATE_NONPROD_KEY = "template_nonprod"
+TEMPLATE_PREFIXED_KEY = "template_prefixed"
+PREFIXED_ENVS_KEY = "prefixed_envs"
 CASE_KEY = "case"
 CASE_UPPER = "upper"
 PATTERN_KEY = "pattern"
@@ -184,8 +187,13 @@ def render(logical_id, registry=None):
     for platform in PLATFORMS:
         spec = registry[SERIALISATIONS_KEY][platform]
         template = spec[TEMPLATE_KEY]
-        if platform == HOSTNAME and env != ENV_PROD:
-            template = spec[TEMPLATE_NONPROD_KEY]
+        # Which env is prefixed is DATA, not a comparison against `prod`. The bare hostname label
+        # belongs to whichever env is not subordinate to another env of the same system: `prod`
+        # because it is the top of a tiered system, and `shared` because it is not tiered at all.
+        # Hard-coding `prod` here is what made `shared` unrepresentable, and what stated a rule in
+        # terms of one of its own cases.
+        if platform == HOSTNAME and env in spec[PREFIXED_ENVS_KEY]:
+            template = spec[TEMPLATE_PREFIXED_KEY]
         name = (template.replace("{env}", env).replace("{system}", system)
                         .replace("{component}", component).replace("{role}", role))
         if spec.get(CASE_KEY) == CASE_UPPER:
@@ -636,6 +644,57 @@ def claims_problems(registry):
     return problems
 
 
+def naming_shape_problems(registry):
+    """The registry's own shape: the places where its prose and its data have to agree.
+
+    Two of those claims would otherwise rot silently, so they are checked rather than trusted:
+
+    - ``prefixed_envs`` is the machine-readable half of the hostname note. Each term must be a real
+      env, and at least one env must still own the bare label, or a logical ID renders onto a
+      hostname the note says is owned by somebody.
+    - every serialisation must be classified in ``declaredness.declared``. A provider name nobody has
+      decided is ours - or is not - is exactly the drift that section exists to stop, and adding a
+      serialisation without classifying it is the mistake the check catches.
+    """
+    problems = []
+    envs = registry[LEVELS_KEY]["env"]
+    prefixed = registry[SERIALISATIONS_KEY][HOSTNAME].get(PREFIXED_ENVS_KEY)
+    where = f"{SERIALISATIONS_KEY}.{HOSTNAME}"
+    if not isinstance(prefixed, list) or not prefixed:
+        problems.append(f"{where}: {PREFIXED_ENVS_KEY} must be a non-empty list of env terms")
+    else:
+        for env in prefixed:
+            if env not in envs:
+                problems.append(
+                    f"{where}: {PREFIXED_ENVS_KEY} names {env!r}, which is not an env term;"
+                    f" allowed: {', '.join(envs)}"
+                )
+        if set(prefixed) >= set(envs):
+            problems.append(
+                f"{where}: every env is prefixed, so no env owns the bare hostname label and"
+                " the note cannot be true"
+            )
+    declared = registry.get(DECLAREDNESS_KEY, {}).get(DECLARED_KEY)
+    if not isinstance(declared, list) or not declared:
+        problems.append(
+            f"{DECLAREDNESS_KEY}.{DECLARED_KEY} must be a non-empty list of serialisations"
+        )
+    else:
+        unclassified = sorted(set(registry[SERIALISATIONS_KEY]) - set(declared))
+        unknown = sorted(set(declared) - set(registry[SERIALISATIONS_KEY]))
+        if unclassified:
+            problems.append(
+                f"{DECLAREDNESS_KEY}.{DECLARED_KEY}: no declared/derived decision for"
+                f" {', '.join(unclassified)}"
+            )
+        if unknown:
+            problems.append(
+                f"{DECLAREDNESS_KEY}.{DECLARED_KEY}: names {', '.join(unknown)}, which"
+                " is not a serialisation in the registry"
+            )
+    return problems
+
+
 def latest_act(record):
     events = record.get(PROVISIONING_KEY)
     if not isinstance(events, list):
@@ -818,7 +877,7 @@ def run_one(command, logical_id):
 
 def report_claims(registry=None):
     registry = registry or load()
-    problems = claims_problems(registry)
+    problems = claims_problems(registry) + naming_shape_problems(registry)
     for warning in claims_warnings(registry):
         print(f"warning: {warning}", file=sys.stderr)
     if problems:
