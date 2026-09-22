@@ -1,21 +1,38 @@
 {
-  // The developer workspace. Never the agency's runtime: it may disappear without affecting
-  // production, and the agency must not depend on it.
   "name": "alphaville-dsh",
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-01",
   "containers": [
     {
-      "name": "dsh-workspace",
+      "class_name": "DshContainer",
       "image": "./container.Dockerfile",
       "instance_type": "standard-1",
       "max_instances": 1,
-      "ssh": { "enabled": true },
+      "ssh": {
+        "enabled": true
+      },
       "authorized_keys": [
-        { "name": "dsh", "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC+FNHSJUqtrnnyea86mdZmXNZJ+c+4LXXtc9ml47eA2 dsh@alphaville.space" }
+        {
+          "name": "dsh",
+          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC+FNHSJUqtrnnyea86mdZmXNZJ+c+4LXXtc9ml47eA2 dsh@alphaville.space"
+        }
       ]
     }
   ],
-  "durable_objects": { "bindings": [{ "name": "DSH", "class_name": "DshContainer" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DshContainer"] }]
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DSH",
+        "class_name": "DshContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "DshContainer"
+      ]
+    }
+  ]
 }

@@ -1,0 +1,14 @@
+{
+  "name": "alphaville-dsh",
+  "private": true,
+  "description": "The developer workspace. Not the agency: it may disappear without affecting production.",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "latest"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}
