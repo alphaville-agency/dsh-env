@@ -7,7 +7,10 @@ export class DshShell extends Container<Env> {
   // The image runs an HTTP responder on 8080 for the platform's startup health check and sshd on 22
   // for the session. sshd cannot answer the check because it does not speak HTTP.
   defaultPort = 8080;
-  requiredPorts = [8080, 22];
+  // Only the HTTP port. The platform verifies every port listed here, and SSH cannot answer an
+  // availability probe on 22 - listing it made every start fail with "failed to verify port 22".
+  // SSH is declared separately in wrangler.jsonc and reached with `wrangler containers ssh`.
+  requiredPorts = [8080];
 
   // Shut down five minutes after the last request. The image polls this Worker while a session is
   // attached, so it lives while someone works and dies when they stop. Idle costs nothing.
@@ -31,7 +34,7 @@ export default {
     // there is no separate step to remember.
     const container = getContainer(env.DSH, "dsh");
     await container.startAndWaitForPorts({
-      ports: [8080, 22],
+      ports: [8080],
       startOptions: {
         envVars: {
           WORKER_HEALTH_URL: "https://dev-dsh.alphaville.space/healthz",
