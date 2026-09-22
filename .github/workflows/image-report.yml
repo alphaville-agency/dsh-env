@@ -206,6 +206,12 @@ jobs:
             | while read -r f; do printf '%s\t%s\n' "$(du -k "$f" 2>/dev/null | cut -f1)" "$f"; done \
             | sort -rn | head -30 | awk '{printf "%8.1f MB  %s\n", $1/1024, $2}'
 
+          hdr "byte-accurate live sizes, comparable with the layer-byte report"
+          echo "# apparent size (bytes of the files themselves):"
+          du -x --apparent-size -sb / /var /root /opt /usr /container-server 2>/dev/null
+          echo "# block usage in bytes, for contrast (this is what plain du -sh rounds):"
+          du -x -sb / /var /root /opt 2>/dev/null
+
           hdr "filesystem totals"
           df -h /
           echo "# non-empty writable layers that a running container would still hold:"
@@ -248,6 +254,13 @@ jobs:
           layers.sort(reverse=True)
 
           top = collections.Counter()
+          depth2 = collections.Counter()
+          TARGETS = ["/var/cache/apt", "/var/lib/apt", "/var/cache", "/var/lib", "/root/.npm",
+                     "/root/.cache", "/root/.local/share/mise", "/root/.pnpm-store",
+                     "/root/.local/share/pnpm", "/tmp", "/opt/dsh-install",
+                     "/root/.dsh/profiles", "/root/.agents", "/usr/share/doc", "/usr/lib/apt",
+                     "/usr/lib/python3", "/usr/share/perl", "/container-server", "/workspace"]
+          targeted = collections.Counter()
           total_raw = 0
           total_gzip = 0
           print()
@@ -263,8 +276,15 @@ jobs:
                   for member in handle:
                       if not member.isreg():
                           continue
-                      parts = member.name.lstrip("./").split("/")
+                      clean = member.name.lstrip("./")
+                      parts = clean.split("/")
+                      full = "/" + clean
                       top["/" + parts[0] if parts[0] else "(root)"] += member.size
+                      depth2["/" + "/".join(parts[:2]) if parts[0] else "(root)"] += member.size
+                      for target in TARGETS:
+                          if full == target or full.startswith(target + "/"):
+                              targeted[target] += member.size
+                              break
 
           print()
           print("TOTAL uncompressed layer bytes  : %d  (%.1f MB)" % (total_raw, total_raw / 1e6))
@@ -274,6 +294,14 @@ jobs:
           print("Every byte in every layer, by top-level path (INCLUDING files later layers deleted):")
           for key, size in top.most_common(45):
               print("%14d  %9.1f MB  %s" % (size, size / 1e6, key))
+          print()
+          print("Depth 2, top 40 (INCLUDING files later layers deleted):")
+          for key, size in depth2.most_common(40):
+              print("%14d  %9.1f MB  %s" % (size, size / 1e6, key))
+          print()
+          print("Named paths: bytes present in layers (INCLUDING content deleted by later layers):")
+          for target in TARGETS:
+              print("%14d  %9.1f MB  %s" % (targeted[target], targeted[target] / 1e6, target))
           ANALYZE_EOF
           python3 -c "import ast,sys; ast.parse(open('/tmp/analyze_layers.py').read())" \
             && echo "analyzer parses as python"
