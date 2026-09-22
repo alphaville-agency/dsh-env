@@ -52,18 +52,24 @@ RUN apt-get update \
 #      generated so the tree is reviewable and reproducible.
 #
 # VERSIONS ARE THE WORKING ONES, TAKEN FROM A RUNNING SETUP, and that is not laziness: the launcher's
-# `latest` (0.1.5-rc.2) is BROKEN. It depends on
-# `@deepseek-ai/dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3`, a version that was never
-# published - the package stops at 0.1.5-rc.2 - so a plain `npm install` of latest fails outright
-# with ETARGET. The first attempt at this layer did exactly that and broke the build. 0.1.5-rc.1 is
-# the version proven to install and run.
+# `latest` (0.1.5-rc.2) is BROKEN. Transitively - through a UI sub-package that has since published a
+# newer version - it requires `@deepseek-ai/dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3`, which
+# was NEVER PUBLISHED. The package stops at 0.1.5-rc.2, so a fresh `npm install` of the launcher
+# fails outright with ETARGET. Pinning a lower launcher version does not help, because the
+# requirement comes from a transitive package rather than the launcher's own manifest - which is why
+# two attempts at pinning a launcher version both failed this build.
 #
-# The npm cache is purged in the same RUN that fills it: layers are additive, so a later `rm -rf`
-# would reclaim nothing of the ~100 MB it leaves behind.
-ARG DSH_LAUNCHER_VERSION=0.1.5-rc.1
-RUN npm install --global "@deepseek-ai/dsh@${DSH_LAUNCHER_VERSION}" \
+# The fix is an npm `overrides` entry pinning that one dependency to the newest version that exists.
+# It lives in a committed manifest and lockfile under dsh-install/, installed with `npm ci` so the
+# tree is identical for every build and the workaround cannot silently drift. This is a workaround
+# for an upstream packaging defect, and the ceiling is that it must be revisited when upstream
+# republishes.
+COPY dsh-install/package.json dsh-install/package-lock.json /opt/dsh-install/
+RUN cd /opt/dsh-install \
+ && npm ci --no-audit --no-fund \
  && npm cache clean --force \
- && rm -rf /root/.npm
+ && rm -rf /root/.npm \
+ && ln -sf /opt/dsh-install/node_modules/.bin/dsh /usr/local/bin/dsh
 
 # The profile's manifest, patch layer and the harness settings, all committed under dsh-profile/ so
 # the configuration the terminal boots with is reviewable in a diff like anything else.

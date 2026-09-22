@@ -74,7 +74,7 @@ describe("container.Dockerfile: every COPY source exists in the repository", () 
     }
   }
 
-  it("copies exactly the four files the harness needs, and says why", () => {
+  it("copies exactly the files the harness needs, and says why", () => {
     // This was "copies nothing at all, because that is the floor" while the image had no harness.
     // It is now an allowlist, deliberately: the point of the assertion was never that the count is
     // zero, it was that a new COPY is a conscious act with a source that exists. Keeping an explicit
@@ -88,6 +88,11 @@ describe("container.Dockerfile: every COPY source exists in the repository", () 
       // One program on PATH that boots the TUI on that profile, because the terminal route passes a
       // single program name rather than a command with arguments.
       "bin/dsh-session",
+      // The launcher's manifest and lockfile. The MANIFEST is copied and the TREE is not: the
+      // override that makes the launcher installable has to be declared somewhere reviewable, and
+      // the lockfile is what makes the resulting tree identical for every build.
+      "dsh-install/package.json",
+      "dsh-install/package-lock.json",
     ];
 
     const actual = copyInstructions().flatMap(({ sources }) => sources).sort();
@@ -117,8 +122,15 @@ describe("container.Dockerfile: the things it removes stay removed", () => {
   });
 
   it("does not copy a node dependency tree in", () => {
-    for (const path of ["dsh-install/package.json", ".dsh/profiles/"]) {
-      assert.ok(!code.includes(`COPY ${path}`), `COPY ${path} is back: that is agent state`);
+    // The MANIFESTS are copied; the TREES are not. That distinction is the whole point: a lockfile
+    // plus `npm ci` reproduces the tree, and committing or copying the tree itself would defeat the
+    // lockfile and put megabytes of transitive dependencies in the image.
+    //
+    // `dsh-install/package.json` used to be listed here as agent state. It is not: the harness is
+    // the toolchain, and the image is the toolchain. What stays out is the installed tree, which is
+    // asserted separately above.
+    for (const path of [".dsh/profiles/", "dsh-install/node_modules/", "dsh-profile/node_modules/"]) {
+      assert.ok(!code.includes(`COPY ${path}`), `COPY ${path} is back: that is a dependency tree`);
     }
   });
 

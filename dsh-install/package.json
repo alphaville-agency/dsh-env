@@ -1,0 +1,7 @@
+{
+  "name": "dsh-install",
+  "private": true,
+  "description": "Pins the harness launcher so the image installs a resolvable tree, not a floating one.",
+  "dependencies": { "@deepseek-ai/dsh": "0.1.5-rc.1" },
+  "overrides": { "@deepseek-ai/dsh-client-ui-sidebar-documentpreview": "0.1.5-rc.2" }
+}
