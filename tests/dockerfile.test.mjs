@@ -74,13 +74,39 @@ describe("container.Dockerfile: every COPY source exists in the repository", () 
     }
   }
 
-  it("copies nothing at all, because that is the floor", () => {
-    // Not a permanent rule: this is the gate that makes the next COPY a deliberate act with a
-    // source that exists, which is the failure this file was written for.
+  it("copies exactly the four files the harness needs, and says why", () => {
+    // This was "copies nothing at all, because that is the floor" while the image had no harness.
+    // It is now an allowlist, deliberately: the point of the assertion was never that the count is
+    // zero, it was that a new COPY is a conscious act with a source that exists. Keeping an explicit
+    // list preserves that, and the reason for each entry stays next to it where a reviewer sees it.
+    const expected = [
+      // The harness settings, and the profile that declares the TUI bundle. Without these the
+      // container boots a launcher with no profile to run.
+      "dsh-profile/settings.yaml",
+      "dsh-profile/package.json",
+      "dsh-profile/cordis.patch.yml",
+      // One program on PATH that boots the TUI on that profile, because the terminal route passes a
+      // single program name rather than a command with arguments.
+      "bin/dsh-session",
+    ];
+
+    const actual = copyInstructions().flatMap(({ sources }) => sources).sort();
+
     assert.deepEqual(
-      copyInstructions(),
-      [],
-      "the floor image copies nothing; when a layer needs a file in the image, add it to this test",
+      actual,
+      [...expected].sort(),
+      "the image's COPY list changed. If that was intended, add the file here with a reason; if " +
+        "not, this is the failure the assertion exists to catch.",
+    );
+  });
+
+  it("does not COPY the profile's dependency tree, which is installed instead", () => {
+    // The profile's node_modules is ~100 MB of transitive dependencies. Committing it would defeat
+    // the lockfile, and copying it would put agent state in the image.
+    assert.ok(
+      !/COPY\s+dsh-profile\/node_modules/.test(code),
+      "the profile's installed tree is being copied in; it is installed at build time from the " +
+        "committed manifest instead",
     );
   });
 });

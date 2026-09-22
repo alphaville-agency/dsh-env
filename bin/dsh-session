@@ -1,0 +1,35 @@
+#!/bin/sh
+# What a session actually runs: the harness, on the dsh-tui profile.
+#
+# WHY THIS EXISTS RATHER THAN A COMMAND WITH ARGUMENTS. The terminal route passes the program to run
+# as a single name from an allowlist (see TERMINAL_SHELL_ALLOWED in src/names.ts), because that value
+# reaches the container as the process to execute and a value that can carry arguments is a command,
+# not a program. The alternative was to open a shell and type `dsh --profile dsh-tui` into it, which
+# is wrong for a session that survives a disconnect: the SDK keeps the PTY alive and replays its
+# output on reconnect, so the injected line would be typed into an already-running TUI.
+#
+# This wrapper is the join between those two facts. It is one program on PATH, and the profile is
+# named here, in the image, where it can be reviewed.
+#
+# The profile is `dsh-tui`, matching the committed dsh-profile/ manifest. `exec` so the TUI replaces
+# this shell rather than running underneath it - a TUI with a shell parent that outlives it is a
+# process nobody can reach.
+#
+# If the TUI cannot start, the reason must be visible. A silent exit would present as a terminal that
+# connects and immediately closes, which is indistinguishable from the container being broken.
+set -eu
+
+PROFILE="${DSH_PROFILE:-dsh-tui}"
+
+if ! command -v dsh >/dev/null 2>&1; then
+    echo "dsh is not on PATH. The harness launcher is missing from this image." >&2
+    exec sh
+fi
+
+if [ ! -d "${DSH_HOME:-/root/.dsh}/profiles/$PROFILE" ]; then
+    echo "the '$PROFILE' profile is not installed in ${DSH_HOME:-/root/.dsh}/profiles." >&2
+    echo "expected the committed dsh-profile/ tree to have been materialised at build time." >&2
+    exec sh
+fi
+
+exec dsh --profile "$PROFILE" "$@"

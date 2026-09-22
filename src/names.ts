@@ -75,8 +75,8 @@ export const ROUTE_ROOT = "/";
  * a shell.
  */
 export const SHELL_PARAM = "shell";
-export const TERMINAL_SHELL_DEFAULT = "dsh";
-export const TERMINAL_SHELL_ALLOWED = ["dsh", "bash", "sh"];
+export const TERMINAL_SHELL_DEFAULT = "dsh-session";
+export const TERMINAL_SHELL_ALLOWED = ["dsh-session", "bash", "sh"];
 
 /**
  * The environment variable holding the shared bearer token, and the prefix it arrives behind.

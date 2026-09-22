@@ -39,22 +39,58 @@ RUN apt-get update \
  && apt-get clean \
  && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
 
-# The harness itself, which is the entire point of this environment: without it the container is a
-# shell in the cloud rather than a place to work.
+# The harness, which is the entire point of this environment: without it the container is a shell in
+# the cloud rather than a place to work.
 #
-# Pinned to an exact version rather than a tag. `latest` on this package currently resolves to
-# 0.1.5-rc.2, while the `next` tag is 0.1.5-rc.3 - and rc.3 is the one whose dependency tree is
-# broken, so an unpinned install is a coin flip that changes without warning. The version installed
-# here is the one the terminal runs, so it is part of the interface, not an implementation detail.
+# It is TWO things, and getting only the first is the trap this file already fell into once:
 #
-# The npm cache is purged in the SAME RUN that fills it. A later `rm -rf` would reclaim nothing:
-# Docker layers are additive and those bytes would stay in this layer forever. That mistake cost
-# 108 MB once already and tests/dockerfile.test.mjs now pins the pattern.
-ARG DSH_HARNESS_VERSION=0.1.5-rc.2
-RUN npm install --global "@deepseek-ai/dsh@${DSH_HARNESS_VERSION}" \
+#   1. `@deepseek-ai/dsh`, the launcher, installed globally so `dsh` is on PATH.
+#   2. A PROFILE at $DSH_HOME/profiles/dsh-tui, whose package.json declares the TUI as a bundle.
+#      The TUI is an out-of-tree mode bundle over `@deepseek-ai/dsh-base`, not a standalone binary,
+#      so `npm install -g <tui>` installs nothing that can be run. `dsh plugin --profile dsh-tui add`
+#      is the documented way to populate it, and the profile's package.json is committed rather than
+#      generated so the tree is reviewable and reproducible.
+#
+# VERSIONS ARE THE WORKING ONES, TAKEN FROM A RUNNING SETUP, and that is not laziness: the launcher's
+# `latest` (0.1.5-rc.2) is BROKEN. It depends on
+# `@deepseek-ai/dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3`, a version that was never
+# published - the package stops at 0.1.5-rc.2 - so a plain `npm install` of latest fails outright
+# with ETARGET. The first attempt at this layer did exactly that and broke the build. 0.1.5-rc.1 is
+# the version proven to install and run.
+#
+# The npm cache is purged in the same RUN that fills it: layers are additive, so a later `rm -rf`
+# would reclaim nothing of the ~100 MB it leaves behind.
+ARG DSH_LAUNCHER_VERSION=0.1.5-rc.1
+RUN npm install --global "@deepseek-ai/dsh@${DSH_LAUNCHER_VERSION}" \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
-# Prove the binary is on PATH at build time. An image that builds and then cannot run its own
-# harness is the failure this environment has spent the longest on, and it is cheap to catch here.
-RUN command -v dsh && dsh --version
+# The profile's manifest, patch layer and the harness settings, all committed under dsh-profile/ so
+# the configuration the terminal boots with is reviewable in a diff like anything else.
+#
+# settings.yaml carries NO credential: the provider block names an environment variable
+# (`apiKeyEnv: CHEAPINFERENCE_COM_API_KEY`) and the value is injected at run time from a Worker
+# secret. That separation is the reason this file is safe to commit at all.
+ENV DSH_HOME=/root/.dsh
+
+# The session wrapper: one program on PATH that boots the TUI on the committed profile. See
+# its own header for why the terminal runs a wrapper instead of a command with arguments.
+COPY bin/dsh-session /usr/local/bin/dsh-session
+RUN chmod 0755 /usr/local/bin/dsh-session
+COPY dsh-profile/settings.yaml     /root/.dsh/settings.yaml
+COPY dsh-profile/package.json      /root/.dsh/profiles/dsh-tui/package.json
+COPY dsh-profile/cordis.patch.yml  /root/.dsh/profiles/dsh-tui/cordis.patch.yml
+
+# Materialise the profile's bundle tree from its committed manifest, and purge the cache in the same
+# layer. `--omit=dev` is not used here: the bundles are the runtime, not build-time tooling.
+RUN cd /root/.dsh/profiles/dsh-tui \
+ && npm install --no-audit --no-fund \
+ && npm cache clean --force \
+ && rm -rf /root/.npm
+
+# Prove at build time that the harness runs and that the profile's bundle is actually present. An
+# image that builds and then cannot boot its own harness is the failure this environment has spent
+# longest on, and it costs nothing to catch here instead of in a session.
+RUN command -v dsh \
+ && dsh --version \
+ && test -d /root/.dsh/profiles/dsh-tui/node_modules/@deepseek-harness-tui/dsh-tui

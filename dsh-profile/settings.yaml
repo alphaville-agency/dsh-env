@@ -1,0 +1,69 @@
+ui-onboarding:
+  welcomeNoticeVersion: 2026-08-13.1
+agent-default-model:
+  provider: cheapinference-com
+  model: deepseek-v4.1-flash
+subagent-model-selection:
+  enabled: true
+  allowedModels:
+    - provider: cheapinference-com
+      model: gpt-5.6-luna
+    - provider: cheapinference-com
+      model: deepseek-v4-flash
+    - provider: cheapinference-com
+      model: deepseek-v4.1-flash
+    - provider: cheapinference-com
+      model: gpt-5.6-sol
+llm-pi-ai:
+  providers:
+    cheapinference-com:
+      displayName: cheapinference.com
+      apiKeyEnv: CHEAPINFERENCE_COM_API_KEY
+      api: openai-completions
+      baseURL: https://api.cheaperinference.com/v1
+      models:
+        - id: deepseek-v4-flash
+          name: deepseek-v4-flash
+          contextWindow: 1000000
+          maxTokens: 128000
+        - id: deepseek-v4.1-flash
+          name: deepseek-v4.1-flash
+          contextWindow: 1048576
+          maxTokens: 384000
+        - id: gpt-5.6-sol
+          name: gpt-5.6-sol
+          contextWindow: 1050000
+          maxTokens: 128000
+        # contextWindow/maxTokens for gpt-5.6-luna are MIRRORED from gpt-5.6-sol,
+        # not discovered: the provider /v1/models endpoint was not queried
+        # because CHEAPINFERENCE_COM_API_KEY is unset on this machine.
+        - id: gpt-5.6-luna
+          name: gpt-5.6-luna
+          contextWindow: 1050000
+          maxTokens: 128000
+llm-deepseek:
+  models: []
+dsh-tui:
+  scrollGutter: timeline
+  pageMargin: normal
+  foldTerminalCommand: true
+  promptSessionLabel: true
+  whale: false
+  whaleIdle: false
+  minimal: false
+  statusBar:
+    thinking: true
+    tokens: false
+    cache: false
+    cost: true
+    tps: true
+    gitBranch: true
+    sessionTitle: true
+    sessionId: true
+    goal: false
+    mode: true
+    activity: true
+    trajectory: true
+  thinkingFold: preview
+  toolBackground: none
+  effortDefault: high
