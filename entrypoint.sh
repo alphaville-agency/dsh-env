@@ -19,6 +19,9 @@ export DSH_STATUS_PORT="$STATUS_PORT"
 python3 /work/keepalive.py &
 
 # 2. Join the tailnet. Failure is reported, not fatal.
+STATE_FILE="${DSH_TAILNET_STATE:-/run/dsh-tailnet.json}"
+write_state() { printf '%s' "$1" > "$STATE_FILE" 2>/dev/null || true; }
+write_state '{"tailnet":"starting"}'
 TAILNET_IP=127.0.0.1
 TS_KEY="${TAILSCALE_AUTHKEY:-${TAILSCALE_OAUTH_CLIENT_SECRET:-}}"
 if command -v tailscale >/dev/null 2>&1 && [ -n "$TS_KEY" ]; then
@@ -27,11 +30,15 @@ if command -v tailscale >/dev/null 2>&1 && [ -n "$TS_KEY" ]; then
                     --hostname="$TS_NAME" --ephemeral --accept-routes; then
         TAILNET_IP="$(tailscale ip -4 | head -1)"
         echo "tailnet address: ${TAILNET_IP}"
+        write_state "{\"tailnet\":\"joined\",\"web_port\":${WEB_PORT}}"
     else
-        echo "tailnet join failed; the interface will bind loopback only"
+        REASON="$(tailscale up --auth-key="$TS_KEY" --hostname="$TS_NAME" --ephemeral --accept-routes 2>&1 | tail -2 | tr -d '"' | tr '\n' ' ' || true)"
+        echo "tailnet join failed: $REASON"
+        write_state "{\"tailnet\":\"failed\",\"reason\":\"$(printf '%s' "$REASON" | cut -c1-180)\"}"
     fi
 else
-    echo "no tailnet credential or binary; interface binds loopback only"
+    echo "no tailnet credential or binary"
+    write_state '{"tailnet":"no-credential"}'
 fi
 
 # 3. The harness browser UI, on the tailnet address ONLY. Bound to the tailnet IP rather than

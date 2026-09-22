@@ -20,6 +20,7 @@ LEASE_DIR = Path(os.environ.get("DSH_LEASE_DIR", "/run/dsh-leases"))
 LEASE_TTL_SECONDS = float(os.environ.get("DSH_LEASE_TTL_SECONDS", "120"))
 TAILNET_PORT = int(os.environ.get("DSH_STATUS_PORT", "8787"))
 PUBLIC_PORT = int(os.environ.get("PORT", "10000"))
+TAILNET_STATE = os.environ.get("DSH_TAILNET_STATE", "/run/dsh-tailnet.json")
 
 
 def tailnet_address() -> str:
@@ -61,7 +62,12 @@ class PublicHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if urlparse(self.path).path == "/healthz":
-            _reply(self, 200, {"ok": True})
+            state = {"ok": True}
+            try:
+                state.update(json.loads(Path(TAILNET_STATE).read_text()))
+            except (OSError, ValueError):
+                state["tailnet"] = "unknown"
+            _reply(self, 200, state)
         else:
             _reply(self, 404, {"error": "not found"})
 
