@@ -11,12 +11,26 @@
 # It is a ONE-SHOT, IDEMPOTENT, TERMINATING step. It is not a daemon, a poll, a timer or a
 # background loop, and it must never become one: every design decision here is subordinate to
 # docs/COST.md, where awake time is the only cost that matters and a heartbeat is the defect the
-# environment was rebuilt to remove. The Worker runs `dsh-state ensure` exactly once per container
-# life, when the state mount is freshly created; a warm container never reaches it.
+# environment was rebuilt to remove.
 #
 #   dsh-state ensure    populate-or-link, doing nothing on a warm store (the Worker's call)
-#   dsh-state refresh   force a re-clone and a re-install of the catalog (the operator's call)
+#   dsh-state refresh   force a re-clone, a re-install of the trees and a re-install of the catalog
 #   dsh-state status    print what is present, and where
+#
+# ORDERING, AND WHY IT IS NOT ENFORCED HERE
+#
+# This script is IN THE CLONE, so it cannot run before the clone exists, and the clone is inside the
+# state mount. The Worker therefore does the two things that must happen first, in this order, on
+# every path that can reach a shell:
+#
+#   1. `mountBucket(STATE, /mnt/state)`          - the mount is the state, and nothing else is true yet
+#   2. `dsh-provision`                           - the image's own script, installs the trees INTO it
+#   3. `dsh-state ensure` (this file)            - clones, links the harness home, installs skills
+#
+# Every step is idempotent and marker-guarded, so running the whole sequence on a warm container is
+# a handful of stats and no network. Nothing other than that sequence may touch the mount, and
+# `dsh-provision` refuses to run at all when the mount is absent rather than installing somewhere
+# that will not survive the wake.
 #
 # DEGRADES HONESTLY. If the network, the repository or the skill registry is unreachable, this
 # script reports what could not be fetched and how to retry, and exits 0. A shell that starts with
@@ -51,10 +65,14 @@ SKILLS_DIR=$AGENTS_HOME/skills
 SKILLS_MARKER=$AGENTS_HOME/.skills-installed
 SKILL_FILE=SKILL.md
 
-# The harness's own profile bundles need their node_modules on LOCAL disk, so profiles/ is the one
-# entry of the clone's .dsh/ that is not symlinked: it is baked into the image at this path.
-# An s3fs (R2 egress) mount answers every read with a network round trip, and a Node require() tree
-# over it is unusable. Everything else travels by symlink.
+# Written by the image's `dsh-provision`, read here only for `refresh` and `status`. It lives in the
+# mount so it survives a wake, and it is what makes a warm start skip the ~400 MB install entirely.
+PROVISION_MARKER=$STATE_MOUNT/.provisioned
+
+# The harness's own profile bundles. `profiles/` is NOT special-cased any more: it is symlinked
+# from the clone like every other entry, because the profile's node_modules now lives in the state
+# mount beside the committed manifests rather than in the image. `dsh-provision` installs it there
+# before this script runs, so the symlink always points at a tree that already exists.
 PROFILES_DIR_NAME=profiles
 
 # Credentials are read from the environment at run time by the Worker and are never stored on the
@@ -121,8 +139,9 @@ ensure_repo() {
 
 # --------------------------------------------------------------------------------------------------
 # The harness home. Every entry of the clone's .dsh/ is symlinked into the harness home under the
-# same name, except profiles/, which the image supplies. No list of files is written down here: a
-# rule or instruction file added to the repository later travels with no change to this script.
+# same name - profiles/ included, because the tree it needs is installed into the mount by
+# `dsh-provision` before this runs. No list of files is written down here: a rule or instruction
+# file added to the repository later travels with no change to this script.
 # --------------------------------------------------------------------------------------------------
 link_harness_home() {
     case "$HARNESS_HOME" in
@@ -133,14 +152,13 @@ link_harness_home() {
     for entry in "$CLONE_DSH"/*; do
         [ -e "$entry" ] || continue
         name=$(basename "$entry")
-        [ "$name" = "$PROFILES_DIR_NAME" ] && continue
         target=$HARNESS_HOME/$name
         # Replace whatever is there. Removing a symlink unlinks the link, never the clone; a real
         # file or directory from an older image is superseded, because the clone is the source.
         rm -rf "$target"
         ln -s "$entry" "$target"
     done
-    say "linked $HARNESS_HOME to the clone ($CLONE_DSH)"
+    say "linked $HARNESS_HOME to the clone ($CLONE_DSH), $PROFILES_DIR_NAME included"
     return 0
 }
 
@@ -217,6 +235,30 @@ install_skills() {
 }
 
 # --------------------------------------------------------------------------------------------------
+# The dependency trees, delegated to the image's own script.
+#
+# `dsh-provision.sh` is in the image and not in the clone on purpose: it has to run BEFORE the clone
+# exists (it installs the trees the clone's manifests describe, from committed lockfiles, into the
+# durable mount). It is idempotent and marker-guarded, so calling it from `ensure` is free on a warm
+# store, and calling it from `refresh` after re-cloning is exactly what re-installs the trees.
+# --------------------------------------------------------------------------------------------------
+PROVISION_BIN=dsh-provision
+
+provision_trees() {
+    if ! command -v "$PROVISION_BIN" >/dev/null 2>&1; then
+        warn "$PROVISION_BIN is not on PATH, so the harness CLI and the TUI profile cannot be installed"
+        warn "retry once it is available, with:  $PROVISION_BIN"
+        return 1
+    fi
+    "$PROVISION_BIN" || {
+        warn "the dependency trees could not be installed; the environment still starts"
+        warn "retry with:  $PROVISION_BIN"
+        return 1
+    }
+    return 0
+}
+
+# --------------------------------------------------------------------------------------------------
 # Subcommands.
 # --------------------------------------------------------------------------------------------------
 ensure() {
@@ -226,16 +268,22 @@ ensure() {
         warn "retry with:  dsh-state refresh"
         return 0
     fi
+    provision_trees || true
     link_harness_home || true
     install_skills || true
     return 0
 }
 
 refresh() {
-    say "forcing a re-clone and a re-install"
+    say "forcing a re-clone, a re-install of the dependency trees, and a re-install of the catalog"
     rm -rf "$REPO_DIR"
     rm -f "$SKILLS_MARKER"
+    # The trees came from the clone's lockfiles, so they are re-installed from the fresh clone. The
+    # old trees are dropped with the clone; the marker lives outside it and must go too, or the next
+    # wake would find a marker and no binaries.
+    rm -f "$PROVISION_MARKER"
     ensure_repo || { warn "could not clone $REPO_SLUG@$REPO_REF; nothing was changed"; return 1; }
+    provision_trees || true
     link_harness_home || return 1
     install_skills || return 1
     return 0
@@ -247,6 +295,13 @@ status() {
     echo "harness home      $HARNESS_HOME"
     echo "agents home       $AGENTS_HOME"
     echo "skills manifest   $SKILLS_MANIFEST"
+    echo
+    echo "dependency trees (installed into the state mount on first run):"
+    echo "  harness CLI     $PROVISION_MARKER$([ -f "$PROVISION_MARKER" ] && echo ' (marker present)' || echo ' (marker absent)')"
+    for profile in "$CLONE_DSH/$PROFILES_DIR_NAME"/*/; do
+        [ -f "$profile/package.json" ] || continue
+        echo "  $(basename "$profile")$([ -d "$profile/node_modules" ] && echo '  node_modules present' || echo '  node_modules ABSENT')"
+    done
     echo
     echo "harness home, symlinked entries:"
     for entry in "$HARNESS_HOME"/* "$HARNESS_HOME"/.[!.]*; do

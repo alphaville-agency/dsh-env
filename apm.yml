@@ -1,0 +1,83 @@
+# The agent configuration this environment installs. This file replaces the hand-written
+# `.agents/skills.json` manifest: it is the same declaration in a standard format, with a lockfile
+# (`apm.lock.yaml`) that pins every package to a commit and a content hash.
+#
+# WHAT THIS IS NOT. It is not what the container reads at run time. The container's agent state is
+# the repository clone on the durable state mount, symlinked into place by `bin/dsh-state.sh`; the
+# image carries only the repo-side toolchain. This manifest, its lockfile, and the deployed trees
+# under `.agents/skills/` are the COMMITTED, REVIEWABLE copy that an agent or the operator edits in
+# the clone. See README.md, "Agent configuration" and "Cutover".
+#
+# WHY EVERY REMOTE DEPENDENCY IS PINNED TO A COMMIT SHA. APM resolves a mutable ref (`main`) against
+# upstream every time the manifest's ref changes, so a branch reference would let the content behind
+# a name move without any edit here -- which is exactly the drift the deleted `skills.json` and its
+# hand-rolled lock existed to stop. A commit SHA is immutable, needs no network to replay, and is
+# what `apm.lock.yaml` pins. To move a skill forward: bump its SHA to the result of
+# `apm install --update`, review the diff, and commit the manifest and the lockfile together.
+#
+# WHAT IS *NOT* HERE, DELIBERATELY. `.dsh/` (the instruction router, MODEL-ROLES.md, settings.yaml,
+# the rules, the dsh profiles) and `.dsh/persistence.json` are configuration for the HARNESS, not
+# agent-primitive packages: dsh reads them from a path, not from a package graph, and nothing in APM
+# installs a dsh profile or decides which path persists. They stay hand-authored, and
+# `tools/check-drift.sh` still guards the one piece of them that is derived -- the naming ontology.
+name: dsh-env
+version: 0.1.0
+description: The dsh developer environment's agent configuration - skills, rules and instructions.
+author: alphaville-agency
+license: MIT
+
+# `agent-skills` is the cross-tool target: it deploys skills to `.agents/skills/`, which is the
+# directory the harness already discovers on its own (`~/.agents/skills`, the clone's
+# `.agents/skills/`). Naming it explicitly rather than relying on auto-detection also keeps this
+# manifest from deploying to a harness directory this repository does not own.
+targets:
+  - agent-skills
+
+# Publish the local source layout (`.apm/`) as this package's own content. Required, not cosmetic:
+# without it APM deploys local content but `apm audit --ci` reports `includes-consent` as a failure.
+includes: auto
+
+dependencies:
+  apm:
+    # --- the skill catalog, previously `.agents/skills.json` ------------------------------------
+    # Same 18 sources, one per entry, each pinned to the commit that entry resolves to today.
+    - cloudflare/skills/skills/agents-sdk#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/cloudflare#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/cloudflare-email-service#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/cloudflare-one#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/cloudflare-one-migrations#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/durable-objects#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/nextjs-on-cloudflare#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/sandbox-migrate-to-next#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/sandbox-next#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/sandbox-stable#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/turnstile-spin#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/web-perf#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/workers-best-practices#b052c32bab7dd493513260228a36c88294f343f1
+    - cloudflare/skills/skills/wrangler#b052c32bab7dd493513260228a36c88294f343f1
+    - neethanwu/ascii-art#cf596737315ebac3f16b22192d536c4653dd4dbb
+    - vercel-labs/skills/skills/find-skills#7407f3893ad4dceab546ac002c3ef806e4000c73
+    - nutlope/hallmark#13ac0ec7e148655948100b6396439e481361d690
+    - ayghri/i-have-adhd#839872f9d1cd634fed642b4589ce7226199cc15f
+
+    # --- the skills this repository owns --------------------------------------------------------
+    # They have no upstream to fetch from, so APM installs them from `.apm/`, where they are
+    # authored (see `.apm/README.md`). This replaces the `./.agents/local/<name>` entries and the
+    # `skills add ./.agents/local/<name> -g -y` step that used to install them.
+    - ./.apm/local/plane
+    - ./.apm/local/alphaville
+    - ./.apm/local/cmo
+
+    # --- the rules the operator authors: DELIBERATELY NOT DECLARED HERE -------------------------
+#
+# `.dsh/rules/design-ladder.md` and `.dsh/rules/research-taste.md` are NOT in this manifest, and
+# that is a finding rather than an omission. APM's instruction primitive deploys only for the
+# `copilot` target (`.github/instructions/`), and it never deploys for `agent-skills`, which is the
+# only target this repository uses. Verified on APM 0.31.0: an `agent-skills` install reports
+# "1 skill(s) integrated" and nothing else, and `apm compile` with `agent-skills` says
+# "no compile outputs, skipping".
+#
+# So declaring them would add a mechanism that produces files nothing in this environment reads,
+# in a directory this repository does not own, while `.dsh/rules/` -- which the `AGENTS.md` router
+# actually links and the harness actually reads -- stays the source of truth either way. The rules
+# therefore stay hand-authored, exactly as they were, and `.apm/instructions/` does not exist.

@@ -1,6 +1,6 @@
 {
   "manifestVersion": 1,
-  "description": "Which path in this container persists, and where. `bin/dsh-state.sh` provisions the environment by reading this file and nothing else: there is no path list in the script, so a path added here is provisioned on the next cold start with no code change. Paths are written with ${NAME} references, substituted by the script from the small set of names it defines (STATE_MOUNT, WORKSPACE, HOME, REPO_DIR, CLONE_DSH, CLONE_AGENTS, HARNESS_HOME, AGENTS_HOME, REPOS_DIR, WORKTREES_DIR).",
+  "description": "Which path in this container persists, and where. This is the DECLARATION: it is the reviewed statement of what survives a wake, and it is what a change to the durable layout is argued against. It is not executed - `bin/dsh-state.sh` and `bin/dsh-provision.sh` name these paths directly, in one constants block each, and this file has to be kept in step with them by hand. The names in `${}` are the ones those blocks define (STATE_MOUNT, WORKSPACE, HOME, REPO_DIR, CLONE_DSH, CLONE_AGENTS, HARNESS_HOME, AGENTS_HOME, REPOS_DIR, WORKTREES_DIR).",
 
   "backends": [
     {
@@ -51,16 +51,35 @@
       "role": "source",
       "provision": "link-from-clone",
       "source": "${CLONE_DSH}",
-      "except": ["profiles"],
-      "exceptReason": "profiles/ is the harness's own runtime, not agent state: dsh loads the TUI from ${HARNESS_HOME}/profiles, and its node_modules tree has to be on local disk because a Node require() tree over s3fs is a network round trip per file. It is installed into the image at build time. Every other entry of the clone's .dsh/ - AGENTS.md, MODEL-ROLES.md, settings.yaml, rules/, ontology/ - is symlinked, so a file added to the repository later arrives with no change here."
+      "note": "Every entry of the clone's .dsh/ is symlinked under the same name, profiles/ included. Nothing is excepted any more: the profile's node_modules is installed into the mount beside its committed manifests by `dsh-provision`, before the clone is linked, so the symlink always points at a tree that exists. A file added to the repository later arrives with no change to the script."
     },
     {
       "path": "${HARNESS_HOME}/profiles",
-      "backend": "ephemeral",
+      "backend": "r2",
       "role": "runtime",
-      "provision": "verify-dir",
-      "required": true,
-      "note": "Supplied by the image, not by the clone. Source: .dsh/profiles in the repository, installed by container.Dockerfile."
+      "provision": "symlink",
+      "target": "${CLONE_DSH}/profiles",
+      "note": "Supplied by the clone, not by the image. Source: .dsh/profiles in the repository, installed at run time by bin/dsh-provision.sh from the committed lockfiles."
+    },
+    {
+      "path": "${REPO_DIR}/dsh-install/node_modules",
+      "backend": "r2",
+      "role": "runtime",
+      "provision": "runtime-install",
+      "manifest": "${REPO_DIR}/dsh-install/package.json",
+      "lockfile": "${REPO_DIR}/dsh-install/package-lock.json",
+      "marker": "${STATE_MOUNT}/.provisioned",
+      "note": "The harness CLI, installed by `npm ci` from the committed lockfile into the mount on the FIRST run and never again. It used to be baked into the image (290 MB) and was removed: a node dependency tree is agent state, not toolchain. The marker in the mount is what makes a warm start skip the install entirely; the binary is what makes a store that lost it repair itself."
+    },
+    {
+      "path": "${CLONE_DSH}/profiles/*/node_modules",
+      "backend": "r2",
+      "role": "runtime",
+      "provision": "runtime-install",
+      "manifest": "${CLONE_DSH}/profiles/*/package.json",
+      "lockfile": "${CLONE_DSH}/profiles/*/pnpm-lock.yaml",
+      "marker": "${STATE_MOUNT}/.provisioned",
+      "note": "The dsh TUI and web profiles (108 MB in the image, removed for the same reason). Installed by pnpm from the frozen lockfile, ONCE. The ceiling is that these trees sit on the s3fs mount: file CONTENTS are never cached locally, so every require() is a round trip. Whether the TUI can load its bundles over s3fs is the one thing here that could not be verified without a container; if it proves too slow, the upgrade path is to copy the tree onto ephemeral disk at provision time, which is cheap because it is derived data."
     },
     {
       "path": "${HOME}/.agents/skills",

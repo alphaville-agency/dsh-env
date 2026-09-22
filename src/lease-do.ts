@@ -54,6 +54,7 @@ import {
   HOLDER_FIELD,
   LEASE_TTL_MS,
   MESSAGE_FIELD,
+  MOUNT_ALREADY_IN_USE,
   MSG_COMMAND,
   MSG_ERROR,
   MSG_EXIT,
@@ -61,9 +62,14 @@ import {
   MSG_READONLY,
   MSG_READY,
   MSG_RESIZE,
+  PROVISION_BIN,
   ROWS_FIELD,
   SANDBOX_ID,
   SLEEP_AFTER,
+  STATE_BINDING,
+  STATE_BIN,
+  STATE_ENSURE,
+  STATE_MOUNT_PATH,
   STORAGE_AWAKE_LEASE,
   STORAGE_INPUT_LEASE,
   TAKEOVER_FLAG,
@@ -79,9 +85,10 @@ import {
   WORK_TTL_MS,
 } from "./names";
 
-/** The bindings this object needs. Only the sandbox: both leases are its own storage. */
+/** The bindings this object needs. The sandbox, and the same STATE bucket the Worker mounts. */
 export interface LeaseEnv {
   Sandbox: DurableObjectNamespace<Sandbox>;
+  STATE: R2Bucket;
 }
 
 /** `keepAlive` is deliberately absent: the awake lease drives it, not a constructor default. */
@@ -229,19 +236,60 @@ export class DshLease extends DurableObject<LeaseEnv> {
     // Opening the upstream starts the container; its `ready` is what flushes every client's role.
     // If it never comes up, say so on this socket rather than leaving a window that looks attached
     // and is not.
+    //
+    // Preparation comes FIRST, and before the PTY is opened rather than in parallel with it, because
+    // the terminal bootstraps `exec dsh` the moment it is up: on a freshly woken container that
+    // binary lives in the state mount and does not exist yet. The order is mount, install, clone -
+    // see prepareContainer. It is waiting, not polling: one forewarned step, then the fan-out.
     this.ctx.waitUntil(
-      this.openUpstream().then(async () => {
-        if (this.upstream === null) {
+      this.prepareContainer()
+        .then(async () => {
+          await this.openUpstream().then(async () => {
+            if (this.upstream === null) {
+              this.sendControl(server, {
+                [TYPE_FIELD]: MSG_ERROR,
+                [MESSAGE_FIELD]: UPSTREAM_UNAVAILABLE,
+              });
+              return;
+            }
+            await this.flush();
+          });
+        })
+        .catch(async () => {
           this.sendControl(server, {
             [TYPE_FIELD]: MSG_ERROR,
             [MESSAGE_FIELD]: UPSTREAM_UNAVAILABLE,
           });
-          return;
-        }
-        await this.flush();
-      }),
+        }),
     );
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /**
+   * Prepare the container on the way in to a terminal, in the one order that works, and never at the
+   * cost of the shell coming up.
+   *
+   * Mount first, because the mount IS the state: the dependency trees are installed into it and the
+   * harness home is symlinked from a clone inside it. Then the two idempotent, marker-guarded steps,
+   * whose exit codes are deliberately ignored - a registry outage has to leave a usable shell with
+   * the failure printed on it, because a container that refuses to start because npm was unreachable
+   * is far worse than one without the TUI.
+   *
+   * It reaches the container through the sandbox RPC, so it needs no HTTP route, no service binding,
+   * and nothing in the container listening for it. Nothing here polls, retries or outlives the call.
+   */
+  private async prepareContainer(): Promise<void> {
+    const sandbox = this.sandbox();
+    try {
+      await sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {});
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // "already in use" is a warm container and the normal case; anything else is not, and the
+      // fetch handler turns it into a 500 so the failure is visible instead of being swallowed.
+      if (!message.includes(MOUNT_ALREADY_IN_USE)) throw error;
+    }
+    await sandbox.exec(`${PROVISION_BIN} || true`);
+    await sandbox.exec(`${STATE_BIN} ${STATE_ENSURE} || true`);
   }
 
   /**

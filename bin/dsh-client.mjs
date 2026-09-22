@@ -147,6 +147,22 @@ function notice(lines) {
   process.stderr.write(`\n${RULE}\n${lines.map((line) => `  ${line}`).join("\n")}\n${RULE}\n\n`);
 }
 
+// Printed once, while the container is being prepared, and only if the terminal has not come up
+// within a couple of seconds. A warm container never sees it; a first run does, and it is the
+// difference between "this is installing" and "this is hung".
+const FIRST_RUN_HINT_MS = 2500;
+
+function firstRunNotice() {
+  const timer = setTimeout(() => {
+    if (ready) return;
+    process.stderr.write(
+      "\r\n[waking the workspace: mounting state, then installing the harness CLI and the TUI\r\n" +
+        " profile into it if this is the first run. One time only; a warm start skips it.]\r\n",
+    );
+  }, FIRST_RUN_HINT_MS);
+  timer.unref?.();
+}
+
 const target = new URL(TERMINAL_URL);
 target.searchParams.set(CLIENT_PARAM, CLIENT_ID);
 if (TAKEOVER) target.searchParams.set(TAKEOVER_PARAM, TAKEOVER_SET);
@@ -193,6 +209,10 @@ socket.addEventListener("open", () => {
   if (stdin.isTTY) stdin.setRawMode(true);
   stdin.resume();
   if (TAKEOVER) process.stderr.write("[taking over the input lease]\n");
+  // A fresh container prepares itself before the terminal opens (mount, install, clone), and on the
+  // very first run that is a real one-time install. Say so once, instead of leaving a blank window
+  // that looks hung; stderr because it is commentary, not terminal output.
+  firstRunNotice();
 });
 
 socket.addEventListener("message", (event) => {

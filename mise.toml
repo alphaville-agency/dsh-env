@@ -1,24 +1,36 @@
-# The workspace toolchain, declared rather than accumulated.
+# The developer's own toolchain tasks. NOT an image dependency.
 #
-# The container's disk is ephemeral, so a tool installed by hand is gone at the next sleep. Rather
-# than syncing a mutable home directory, the toolchain is declared here and baked into the image by
-# CI: adding a tool is a commit, which is reproducible, reviewable and identical for every session.
+# `mise` used to be installed into the container image with `curl mise.run | sh` (a single 135 MB
+# binary) plus a `mise install` step, on the theory that the toolchain that moves fast is declared
+# rather than hand-installed. It provided NOTHING: `[tools]` below is empty, so mise installed no
+# tool, and all the image got for 135 MB was a set of shims on PATH. It was removed from the image
+# and is not coming back on size grounds alone.
 #
+# The declaration is kept, and so is this file, because these tasks are how a developer runs the
+# suite on their own machine, where mise is already installed. The container does not need mise to
+# run them: `node --test 'tests/**/*.test.mjs'` is the whole task, and it is what CI runs.
+#
+# If a toolchain ever IS wanted inside the container, mise is the wrong shape for it: a tool fetched
+# at run time into the state mount would have to be re-fetched on a store that lost it, and it would
+# put a network fetch on the critical path of waking up. Declare the tool in the Dockerfile's apt
+# layer instead, where it is measured, cached, and paid for once per image rather than once per wake.
+
 # [tools]
 # ripgrep = "latest"
 # ast-grep = "latest"
 # uv = "latest"
 
 [tasks.install]
-description = "Install the declared toolchain"
+description = "Install the declared toolchain (on a developer machine, not in the image)"
 run = "mise install"
 
 [tasks.check]
 description = "Show what is installed and what is missing"
 run = "mise ls"
 
-# Node's own test runner, so the suite adds no dependency. It covers the two leases, which are pure
-# state machines in src/leases.ts; the sockets and the container are not reachable from here.
+# Node's own test runner, so the suite adds no dependency. It covers the leases, which are pure
+# state machines in src/leases.ts, the Dockerfile's COPY sources, and the provisioning scripts'
+# contract. The sockets and the container are not reachable from here.
 [tasks.test]
-description = "Run the lease tests (Node's built-in test runner)"
+description = "Run the test suite (Node's built-in test runner)"
 run = "node --test 'tests/**/*.test.mjs'"

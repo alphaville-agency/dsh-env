@@ -27,6 +27,7 @@ import {
   METHOD_POST,
   MOUNT_ALREADY_IN_USE,
   OK_FIELD,
+  PROVISION_BIN,
   ROUTE_FIELD,
   ROUTE_HEALTHZ,
   ROUTE_ROOT,
@@ -39,6 +40,8 @@ import {
   SERVICE_NAME,
   SLEEP_AFTER,
   STATE_BINDING,
+  STATE_BIN,
+  STATE_ENSURE,
   STATE_MOUNT_PATH,
   WEBSOCKET_UPGRADE,
   WORK_TOKEN_FIELD,
@@ -81,14 +84,47 @@ function leaseFor(env: Env): DurableObjectStub<DshLease> {
  * Mounts live on the container filesystem and do not survive the container being recreated, so this
  * runs before every operation that touches STATE_MOUNT_PATH. An already-mounted path is a success,
  * not a failure - that is what a warm container looks like.
+ *
+ * It answers whether THIS call created the mount, and the answer is what makes preparation one-shot
+ * per wake without a poll and without asking the container anything: the SDK keeps `activeMounts` in
+ * the Durable Object, so a warm container answers "already in use" and a freshly woken one mounts.
  */
-async function ensureStateMounted(sandbox: Sandbox): Promise<void> {
+async function ensureStateMounted(sandbox: Sandbox): Promise<boolean> {
   try {
     await sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {});
+    return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes(MOUNT_ALREADY_IN_USE)) throw error;
+    return false;
   }
+}
+
+/**
+ * Prepare the container, in one order, on a container that has just been recreated.
+ *
+ * The mount comes first because it IS the state: the dependency trees are installed into it and the
+ * harness home is symlinked from a clone inside it, so anything that runs before this step is
+ * writing somewhere that will not survive the wake.
+ *
+ * `dsh-provision` then installs the node dependency trees (the harness CLI and the TUI profile,
+ * ~400 MB) into the mount from the clone's committed lockfiles, and `dsh-state ensure` clones, links
+ * and installs the skill catalog. Both are idempotent and marker-guarded in the mount, so this is
+ * the first-run cost and nothing else.
+ *
+ * It must not gate the container coming up. A registry outage has to leave a usable shell with the
+ * failure printed on it - a container that refuses to start because npm was unreachable is far worse
+ * than one without the TUI - so the exit codes are deliberately ignored and the output is left on
+ * the terminal. Nothing here polls, retries, or outlives the request.
+ *
+ * ponytail: the two commands are awaited, so a cold start pays the install before the shell appears.
+ * The ceiling is the registry's latency on that one wake; the upgrade path, if the stall is ever the
+ * complaint, is `startProcess` for the second command and a marker the shell checks.
+ */
+async function prepareContainer(sandbox: Sandbox): Promise<void> {
+  if (!(await ensureStateMounted(sandbox))) return;
+  await sandbox.exec(`${PROVISION_BIN} || true`);
+  await sandbox.exec(`${STATE_BIN} ${STATE_ENSURE} || true`);
 }
 
 /** Run one command and hand back the buffered result. This request is what wakes the sandbox. */
@@ -103,7 +139,9 @@ async function runCommand(request: Request, env: Env): Promise<Response> {
   }
 
   const sandbox = sandboxFor(env);
-  await ensureStateMounted(sandbox);
+  // One request per wake in practice, so preparing here and again on the terminal path costs a
+  // single "already in use" round trip and removes every ordering question about which came first.
+  await prepareContainer(sandbox);
   const { stdout, stderr, exitCode, success } = await sandbox.exec(command);
   return Response.json({ stdout, stderr, exitCode, success });
 }

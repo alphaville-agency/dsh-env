@@ -55,13 +55,29 @@ jobs:
           cat .dockerignore 2>&1 || echo "(none: the whole checkout is the context)"
           echo "--- context size present in CI ---"
           du -sh --exclude=.git . 2>/dev/null
-          echo "--- COPY sources, PRESENT or MISSING ---"
-          for p in dsh-install/package.json dsh-install/package-lock.json mise.toml \
-                   agent/AGENTS.md agent/MODEL-ROLES.md agent/settings.yaml agent/rules \
-                   agent/skills agent/ontology/registry.json agent/ontology/validate.py \
-                   agent/ontology/PIN.json agent/ontology/README.md agent/profiles; do
-            if [ -e "$p" ]; then printf 'PRESENT  %-45s %s\n' "$p" "$(du -sh "$p" 2>/dev/null | cut -f1)";
-            else printf 'MISSING  %s\n' "$p"; fi
+          echo "--- COPY sources, PRESENT or MISSING (read from the Dockerfile, not a hand list) ---"
+          # The previous version of this block was a hand-written list of agent/* paths, and it went
+          # stale exactly the way the Dockerfile's own COPY lines did: the commit that broke the
+          # build had this list naming paths that no longer existed and no longer mattered. So the
+          # list is DERIVED from the COPY instructions themselves, and a source that is missing is
+          # reported here rather than twenty minutes into a build.
+          grep -E '^COPY ' container.Dockerfile | while read -r _ rest; do
+            set -- $rest
+            last=""
+            for token in $@; do
+              if [ -n "$last" ]; then
+                if [ -e "$last" ]; then printf 'PRESENT  %-48s %s\n' "$last" "$(du -sh "$last" 2>/dev/null | cut -f1)";
+                else printf 'MISSING  %s\n' "$last"; fi
+              fi
+              last=$token
+            done
+          done
+          echo "--- the paths the runtime install targets, which must be ABSENT from the image ---"
+          # These are the trees that moved out of the image and into the durable state mount on
+          # first run. A non-ABSENT line here means the image is carrying agent state again.
+          for p in /opt/dsh-install /root/.dsh/profiles /root/.local/share/mise /root/.npm; do
+            if [ -e "$p" ]; then printf 'PRESENT  %s  (should be absent)\n' "$p";
+            else printf 'ABSENT   %s\n' "$p"; fi
           done
           echo "--- node_modules anywhere in the context (expected: none, gitignored) ---"
           find . -maxdepth 4 -name node_modules -type d 2>/dev/null | head -20 || true
@@ -139,7 +155,7 @@ jobs:
           hdr "/usr/local/bin/dsh resolution and the toolchain on PATH"
           ls -la /usr/local/bin/dsh 2>&1
           readlink -f /usr/local/bin/dsh 2>&1
-          for t in dsh node npm npx pnpm corepack mise python3 pip3 gh git tmux rg jq rclone less make; do
+          for t in dsh dsh-state dsh-provision node npm npx pnpm corepack python3 pip3 gh git tmux rg jq less make; do
             printf '%-10s %s\n' "$t" "$(command -v "$t" 2>/dev/null || echo 'NOT ON PATH')"
           done
 
@@ -161,6 +177,10 @@ jobs:
           du -xsh /opt/dsh-install/node_modules/* 2>/dev/null | sort -rh | head -30
           echo "# scoped packages"
           du -xsh /opt/dsh-install/node_modules/@*/* 2>/dev/null | sort -rh | head -40
+
+          hdr "apt ARCHIVE check: the base image keeps downloaded .debs, so this is ~299 MB if unpurged"
+          du -xsh /var/cache/apt/archives 2>/dev/null || echo "/var/cache/apt/archives ABSENT (purged in the layer that fetched it - expected)"
+          ls -1 /var/cache/apt/archives/*.deb 2>/dev/null | wc -l
 
           hdr "npm / pnpm / pip caches after the Dockerfile's in-layer removals"
           for p in /root/.npm /root/.npm/_cacache /root/.cache /root/.cache/pip /root/.cache/node-gyp \
@@ -187,10 +207,10 @@ jobs:
           ls -la /usr/local/lib/node_modules 2>/dev/null
           du -xsh /usr/local/lib/node_modules/* 2>/dev/null | sort -rh | head -20
 
-          hdr "mise: what the installer left behind"
-          ls -la /root/.local /root/.local/bin /root/.local/share 2>/dev/null
+          hdr "mise: EXPECTED ABSENT (it was 135 MB of a binary with an empty [tools] list)"
+          ls -la /root/.local /root/.local/bin /root/.local/share 2>/dev/null || echo "(no /root/.local at all: mise was removed)"
           du -xsh /root/.local/* 2>/dev/null | sort -rh
-          ls -la /root/.local/share/mise/installs 2>/dev/null || echo "(no mise installs: mise.toml [tools] is empty)"
+          command -v mise || echo "mise is not on PATH, which is the expected state"
 
           hdr "the agent configuration copied in (instructions, skills, ontology)"
           du -xsh /root/.dsh /root/.agents 2>/dev/null
@@ -201,12 +221,106 @@ jobs:
             | while read -r f; do printf '%s\t%s\n' "$(du -k "$f" 2>/dev/null | cut -f1)" "$f"; done \
             | sort -rn | head -30 | awk '{printf "%8.1f MB  %s\n", $1/1024, $2}'
 
+          hdr "byte-accurate live sizes, comparable with the layer-byte report"
+          echo "# apparent size (bytes of the files themselves):"
+          du -x --apparent-size -sb / /var /root /opt /usr /container-server 2>/dev/null
+          echo "# block usage in bytes, for contrast (this is what plain du -sh rounds):"
+          du -x -sb / /var /root /opt 2>/dev/null
+
           hdr "filesystem totals"
           df -h /
           echo "# non-empty writable layers that a running container would still hold:"
           du -xsh / 2>/dev/null
           INSIDE_EOF
           echo "wrote /tmp/inside.sh ($(wc -l < /tmp/inside.sh) lines)"
+
+      # Every byte in every layer, including files a LATER layer deleted (which `du` on the running
+      # container cannot see). This is what closes the gap between the sum of layer sizes and the
+      # filesystem, and it measures the compressed size the registry actually stores per layer.
+      - name: Write the layer-content analyzer
+        run: |
+          cat > /tmp/analyze_layers.py <<'ANALYZE_EOF'
+          import collections, gzip, os, sys, tarfile
+
+          IMAGE_TAR = "/tmp/img.tar"
+          LAYERS_DIR = "/tmp/layers"
+
+          if not os.path.exists(IMAGE_TAR):
+              print("no image tar at %s" % IMAGE_TAR)
+              sys.exit(0)
+          tar_bytes = os.path.getsize(IMAGE_TAR)
+          print("docker-save tar size: %d bytes (%.1f MB)" % (tar_bytes, tar_bytes / 1e6))
+
+          candidates = []
+          for root, dirs, files in os.walk(LAYERS_DIR):
+              for name in files:
+                  candidates.append(os.path.join(root, name))
+
+          layers = []
+          for path in candidates:
+              try:
+                  handle = tarfile.open(path, "r:")
+              except Exception:
+                  continue
+              members = handle.getmembers()
+              handle.close()
+              if members:
+                  layers.append((sum(m.size for m in members if m.isreg()), path))
+          layers.sort(reverse=True)
+
+          top = collections.Counter()
+          depth2 = collections.Counter()
+          TARGETS = ["/var/cache/apt", "/var/lib/apt", "/var/cache", "/var/lib", "/root/.npm",
+                     "/root/.cache", "/root/.local/share/mise", "/root/.pnpm-store",
+                     "/root/.local/share/pnpm", "/tmp", "/opt/dsh-install",
+                     "/root/.dsh/profiles", "/root/.agents", "/usr/share/doc", "/usr/lib/apt",
+                     "/usr/lib/python3", "/usr/share/perl", "/container-server", "/workspace"]
+          targeted = collections.Counter()
+          total_raw = 0
+          total_gzip = 0
+          print()
+          print("%14s %14s  %s" % ("uncompressed", "gzip-6", "layer"))
+          for _, path in layers:
+              with open(path, "rb") as fh:
+                  raw = fh.read()
+              compressed = len(gzip.compress(raw, 6))
+              total_raw += len(raw)
+              total_gzip += compressed
+              print("%14d %14d  %s" % (len(raw), compressed, path))
+              with tarfile.open(path, "r:") as handle:
+                  for member in handle:
+                      if not member.isreg():
+                          continue
+                      clean = member.name.lstrip("./")
+                      parts = clean.split("/")
+                      full = "/" + clean
+                      top["/" + parts[0] if parts[0] else "(root)"] += member.size
+                      depth2["/" + "/".join(parts[:2]) if parts[0] else "(root)"] += member.size
+                      for target in TARGETS:
+                          if full == target or full.startswith(target + "/"):
+                              targeted[target] += member.size
+                              break
+
+          print()
+          print("TOTAL uncompressed layer bytes  : %d  (%.1f MB)" % (total_raw, total_raw / 1e6))
+          print("TOTAL gzip-6 (compressed proxy) : %d  (%.1f MB)" % (total_gzip, total_gzip / 1e6))
+          print("uncompressed + gzip-6           : %.1f MB" % ((total_raw + total_gzip) / 1e6))
+          print()
+          print("Every byte in every layer, by top-level path (INCLUDING files later layers deleted):")
+          for key, size in top.most_common(45):
+              print("%14d  %9.1f MB  %s" % (size, size / 1e6, key))
+          print()
+          print("Depth 2, top 40 (INCLUDING files later layers deleted):")
+          for key, size in depth2.most_common(40):
+              print("%14d  %9.1f MB  %s" % (size, size / 1e6, key))
+          print()
+          print("Named paths: bytes present in layers (INCLUDING content deleted by later layers):")
+          for target in TARGETS:
+              print("%14d  %9.1f MB  %s" % (targeted[target], targeted[target] / 1e6, target))
+          ANALYZE_EOF
+          python3 -c "import ast,sys; ast.parse(open('/tmp/analyze_layers.py').read())" \
+            && echo "analyzer parses as python"
+          wc -l /tmp/analyze_layers.py
 
       - name: Measure the image
         if: always()
@@ -333,6 +447,15 @@ jobs:
           hdr "9. DELETION-VS-LAYER CHECK (does the final rm -rf actually shrink anything?)"
           echo "# The final RUN that rm -rf's the caches must appear in history as ~0B: the bytes it deletes"
           echo "# live on in the layers that created them. Compare the history sizes above."
+
+          hdr "10. EVERY BYTE IN EVERY LAYER (docker save) + the compressed size the registry stores"
+          docker save -o /tmp/img.tar "$IMAGE" 2>&1 || echo "docker save failed"
+          ls -la /tmp/img.tar
+          rm -rf /tmp/layers
+          mkdir -p /tmp/layers
+          tar -xf /tmp/img.tar -C /tmp/layers 2>&1 || echo "tar -xf failed"
+          find /tmp/layers -maxdepth 2 -type f -name '*.tar' -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -20
+          python3 /tmp/analyze_layers.py 2>&1
           MEASURE_EOF
           bash /tmp/measure.sh 2>&1 | tee "$OUT/report.txt"
 

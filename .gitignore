@@ -10,3 +10,6 @@ worker-configuration.d.ts
 # Local overrides. Never a place for secrets that must reach the container: those are Worker
 # secrets on the deployed Worker, not files on a laptop.
 .dev.vars
+
+# APM dependencies
+apm_modules/

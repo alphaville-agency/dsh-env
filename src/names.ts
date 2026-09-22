@@ -27,6 +27,21 @@ export const STATE_BINDING = "STATE";
 export const STATE_MOUNT_PATH = "/mnt/state";
 
 /**
+ * The image's first-run provisioner, and the two commands that follow it. They are one sequence and
+ * the order is the contract: the mount is the state, the provisioner installs the dependency trees
+ * into it from the clone's committed lockfiles, and `dsh-state ensure` clones and links the harness
+ * home. All three are idempotent and marker-guarded, so running them on a warm container is a few
+ * stats and no network, and running them is the ONLY way the container is prepared - there is no
+ * start hook, no daemon and nothing in the background.
+ *
+ * The provisioner ships in the image rather than the clone on purpose: it has to run before the
+ * clone exists, because it is what installs the trees the clone's manifests describe.
+ */
+export const PROVISION_BIN = "dsh-provision";
+export const STATE_BIN = "dsh-state";
+export const STATE_ENSURE = "ensure";
+
+/**
  * `mountBucket` throws when the path is already mounted, which is a normal, successful outcome:
  * mounts do not survive the container being recreated, and they are already there when it is not.
  * Matching on this fragment is a string contract we do not own; the SDK's own error text is the

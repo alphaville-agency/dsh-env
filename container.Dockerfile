@@ -6,6 +6,12 @@
 # lower the rate; the idle cost is driven by `sleepAfter` alone (5 minutes, src/worker.ts) plus the
 # rule that nothing inside the container may poll, ping or heartbeat to stay awake. See docs/COST.md.
 #
+# But image size is not nothing: Cloudflare refuses an image over the 2000 MB that comes with `lite`,
+# and it counts the image differently from Docker (1572 MB by `docker image inspect` was reported as
+# 2250 MB - a ratio of ~1.43). This file therefore keeps only the TOOLCHAIN. Node dependency trees
+# are agent state and are installed on first run into the durable state mount, by
+# `bin/dsh-provision.sh`, which is the one thing here that makes the image do that.
+#
 # The base image is the official Cloudflare Sandbox runtime for the stable SDK. It already contains
 # the container runtime server that answers port verification, exec and lifecycle, plus Node, so
 # nothing is copied out of it, no entrypoint is overridden, and no sshd is installed. This file adds
@@ -18,17 +24,38 @@ FROM docker.io/cloudflare/sandbox:0.12.9
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# The workspace toolchain, in one layer with the package lists dropped again so the image stays
-# thin without chasing bytes at the cost of a usable environment.
+# The workspace toolchain, in one layer.
+#
+# `apt-get clean` plus the explicit `rm` of the archive directory is not tidiness, it is ~299 MB of
+# the image. The base image sets `Binary::apt::APT::Keep-Downloaded-Packages "true"`, so apt keeps
+# every downloaded .deb in /var/cache/apt/archives - and removing them in a LATER layer would not
+# help at all, because Docker layers are additive and the bytes stay in the layer that fetched them.
+# The purge is therefore in the same RUN as the install, and the same rule applies to the gh layer
+# below. (A final sweep layer was tried before and measured at 0 B of image.)
+#
+# What is here and why, because "an interactive shell does not need it" is how a working box gets
+# broken:
+#   git curl ca-certificates  work: clone, fetch, and TLS for both
+#   jq                        bin/dsh-state.sh parses the skill manifest with it; dsh.sh uses it
+#   ripgrep less tmux         the interactive editing and window tools
+#   make                      Makefile-driven work; native module builds fail anyway without a
+#                             compiler, so this is for the shell, not for npm
+#   python3 python3-pip python3-venv
+#                             scripts, the ontology validator, and Python work in general
+#   gnupg                     git commit signing and any package verification done in the shell
+# Removed from the previous list: `rclone`, 40 MB. It was kept for a state sync that the R2 binding
+# mount replaced; nothing in this repository, the image or the Worker references it any more.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      git curl jq ripgrep less tmux rclone make \
+      git curl jq ripgrep less tmux make \
       python3 python3-pip python3-venv \
       ca-certificates gnupg \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get clean \
+ && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
 
 # GitHub CLI. The base is Ubuntu 22.04, which has no `gh` package, so this is the documented
-# official repository rather than a guess.
+# official repository rather than a guess. Same-layer purge as above: `gh` pulls libicu70 and the
+# archives for both are otherwise 40% of this layer.
 # ponytail: not verified by a build - there is no Docker on the machine this was written on, so the
 # image was never built locally. The ceiling is the availability of the cli.github.com apt repo;
 # the upgrade path is the release tarball if this layer ever fails.
@@ -40,41 +67,47 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
       > /etc/apt/sources.list.d/github-cli.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends gh \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get clean \
+ && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
 
-# mise, because the toolchain that moves fast is declared in the committed mise.toml below rather
-# than hand-installed into a disk that vanishes at the next wake.
-RUN curl -fsSL https://mise.run | sh
-ENV PATH="/root/.local/bin:/root/.local/share/mise/shims:${PATH}"
-
-# The harness CLI, so the terminal can land straight in the dsh TUI.
+# `mise` is deliberately absent. It was 135 MB of a single binary whose committed `mise.toml` has an
+# EMPTY `[tools]` list, so it installed nothing and only its shims were on PATH. A toolchain
+# manager with no declared tools is 135 MB of nothing; see README.md, "Why there is no mise".
+# The `[tasks]` in mise.toml are still used - by a developer on their own machine, where mise is
+# already installed - and that is why the file stays in the repository.
 #
-# Installed from a committed manifest and lockfile rather than `npm install -g
-# @deepseek-ai/dsh`. That form is not merely unpinned, it is currently BROKEN: the latest dsh
-# resolves a transitive @deepseek-ai/dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3, and rc.3
-# was never published, so a fresh install fails with ETARGET no matter which dsh version you ask
-# for. An override pins that one dependency back to the latest version that does exist.
+# corepack, made reachable on PATH, and this is a correctness fix rather than housekeeping.
 #
-# This is a workaround for an upstream packaging defect, not a preference. The ceiling is that
-# dsh-install/package.json must be revisited when upstream republishes; the upgrade path is to
-# drop the override, regenerate the lockfile and rebuild. `npm ci` means the tree is identical
-# for every build and the override cannot silently drift.
-COPY dsh-install/package.json dsh-install/package-lock.json /opt/dsh-install/
-RUN cd /opt/dsh-install \
- && npm ci --no-audit --no-fund \
- && ln -sf /opt/dsh-install/node_modules/.bin/dsh /usr/local/bin/dsh
+# Node ships corepack, but this base image symlinks only `npm` and `npx` into /usr/local/bin, so
+# `corepack` was NOT on PATH. The previous version of this file tested for corepack and silently
+# fell through to `npm install --omit=dev --no-package-lock` for every profile: `pnpm-lock.yaml` was
+# ignored entirely, the install was not reproducible, and the comment claiming `--frozen-lockfile`
+# was false. The install now happens at run time (see bin/dsh-provision.sh), which resolves corepack
+# for itself as well, so this layer exists to make the intended path the available one.
+# ponytail: not verified by a build - no Docker here. The ceiling is where this base image puts
+# Node's global modules; the upgrade path is `npm install --global corepack` (attempted below) and
+# the runtime resolver in bin/dsh-provision.sh, which finds corepack through `npm root -g` and
+# labels an npm install as lockfile-less if it genuinely cannot.
+RUN set -eux; \
+    if ! command -v corepack >/dev/null 2>&1; then \
+      global_root="$(npm root -g)"; \
+      corepack_js="$global_root/corepack/dist/corepack.js"; \
+      if [ -f "$corepack_js" ]; then \
+        printf '#!/bin/sh\nexec node %s "$@"\n' "$corepack_js" > /usr/local/bin/corepack; \
+        chmod 0755 /usr/local/bin/corepack; \
+      else \
+        npm install --global corepack; \
+      fi; \
+    fi; \
+    command -v corepack; \
+    corepack --version; \
+    corepack enable >/dev/null 2>&1 || corepack enable --install-directory /usr/local/bin >/dev/null 2>&1 || true
 
 RUN mkdir -p /workspace
 WORKDIR /workspace
 
-# The declared toolchain, baked in from a committed file so every session is identical. A declared
-# tool that does not install is a broken image, so this fails the build instead of `|| true`-ing
-# past it.
-COPY mise.toml /workspace/mise.toml
-RUN mise trust mise.toml && mise install
-
 # ==================================================================================================
-# BEGIN AGENT WORKSPACE CONFIGURATION (vendored from agent/, installed declaratively)
+# BEGIN AGENT WORKSPACE CONFIGURATION (vendored from .dsh/ and .agents/, installed declaratively)
 # ==================================================================================================
 #
 # WHY THESE FILES ARE COMMITTED AND BAKED IN, WHEN CREDENTIALS MUST NEVER BE
@@ -88,9 +121,15 @@ RUN mise trust mise.toml && mise install
 #
 # LIVE CREDENTIALS ARE THE OPPOSITE and must NEVER be baked in. .dsh/settings.yaml names the gateway
 # key by ENVIRONMENT VARIABLE (apiKeyEnv: CHEAPINFERENCE_COM_API_KEY) and holds no value; the value
-# is injected at run time from Worker secrets. agent/sync.sh refuses to finish if it finds a
+# is injected at run time from Worker secrets. tools/sync.sh refuses to finish if it finds a
 # credential-shaped string in the vendored tree, and .dsh/ontology/check-drift.sh proves the tree
 # still matches its pins.
+#
+# WHAT IS *NOT* HERE, AND THAT IS THE POINT. The instruction files travel because they are small and
+# are read before any network is available. The NODE DEPENDENCY TREES do not: the harness CLI
+# (~290 MB) and the TUI profile (~108 MB) are installed on first run into the durable state mount by
+# bin/dsh-provision.sh, from the lockfiles the repository already commits. They are agent state, not
+# toolchain, and they are the two largest things that used to be here.
 #
 # ONE SKILL CATALOG, IN THE CONVENTIONAL LOCATION. Skills are discovered by the harness from
 # `.agents/skills/`, so the whole catalog - including the Plane skill - is installed there and
@@ -106,93 +145,58 @@ ENV HOME=/root
 COPY .dsh/AGENTS.md .dsh/MODEL-ROLES.md .dsh/settings.yaml .dsh/rules/ /root/.dsh/
 
 # The few skills that exist only here, installed into the discovery path the harness already
-# searches. The rest of the catalog is NOT vendored into the image: `.agents/skills.json` is the
-# manifest and the rest are installed at run time, so the image carries no third-party copies and
-# skills stay current without a rebuild. These are the local-only ones, which have nowhere to be
-# fetched from and so must ride in the image.
-COPY .agents/local/ /root/.agents/skills/
+# searches. The rest of the catalog is NOT vendored into the image: it is declared in `apm.yml` and
+# deployed under `.agents/skills/`, so the image carries no third-party copies and skills stay
+# current without a rebuild. These are the local-only ones, which have nowhere to be fetched from
+# and so must ride in the image.
+#
+# NOTE FOR WHOEVER LANDS THE APM MIGRATION. That work moved these files from `.agents/local/` to
+# `.apm/local/`, and `.agents/local/` is EMPTY in the working tree. The image installs them from the
+# new location, which is what makes this COPY resolve today. APM's own `deploy` puts them at
+# `.agents/skills/`; this COPY is what the CONTAINER needs, and it is the same three skills either
+# way. Whoever finishes the migration should reconcile the two rather than leave both paths
+# load-bearing.
+COPY .apm/local/ /root/.agents/skills/
 
 # The naming registry: a derived, READ-ONLY copy of the canonical registry in the capability repo,
-# pinned by PIN.json. Copied as the artefacts only - registry.json, validate.py, PIN.json and its
-# README - because the two scripts that live beside them in the repository (sync.sh and
-# check-drift.sh) are REPO-SIDE TOOLING: sync.sh copies from the operator's laptop, which does not
-# exist here, and check-drift.sh verifies the catalog's repository layout. validate.py resolves
-# registry.json next to itself, so `python3 /root/.dsh/ontology/validate.py list` works as installed.
-# python3 is already in the image from the apt layer above; nothing is added for this.
+# pinned by PIN.json - and, in apm.yml, by the commit SHA of the two files it takes from it. Copied
+# as the artefacts only - registry.json, validate.py, PIN.json and its README - because the two
+# scripts that live beside them in the repository (sync.sh and check-drift.sh) are REPO-SIDE
+# TOOLING: sync.sh copies from the operator's laptop, which does not exist here, and check-drift.sh
+# verifies the catalog's repository layout. validate.py resolves registry.json next to itself, so
+# `python3 /root/.dsh/ontology/validate.py list` works as installed. python3 is already in the image
+# from the apt layer above; nothing is added for this.
 COPY .dsh/ontology/registry.json .dsh/ontology/validate.py .dsh/ontology/PIN.json .dsh/ontology/README.md /root/.dsh/ontology/
 
-# The dsh profiles, which are what make `dsh` a TUI rather than a bare CLI. DSH_HOME is the parent of
-# profiles/, so it must agree with where this COPYs to and with where the instruction files above
-# land: a profile at the right path with DSH_HOME unset is still a TUI that does not start. It is set
-# as ENV so a login shell and every process dsh spawns see it.
+# DSH_HOME is the parent of profiles/, and profiles/ is now a symlink into the state mount rather
+# than a directory in this image (see README.md, "First run"). It must still agree with where the
+# instruction files land: a profile at the right path with DSH_HOME unset is still a TUI that does
+# not start. It is set as ENV so a login shell and every process dsh spawns see it.
 ENV DSH_HOME=/root/.dsh
 
-# Only the declarative profile files are committed - package.json, pnpm-lock.yaml, pnpm-workspace
-# and the cordis layers. Installed dependencies are NOT in the repository and NOT in the build
-# context: they are regenerated here from the lockfile, which is what a lockfile is for.
-COPY .dsh/profiles/ /root/.dsh/profiles/
+# ==================================================================================================
+# The first-run provisioner.
+#
+# `dsh-provision` is in the IMAGE and not in the clone on purpose: it has to run BEFORE the clone
+# exists, because it installs the trees the clone's committed lockfiles describe, INTO the state
+# mount the clone lives in. `dsh-state` cannot be in the image for the same reason - it lives in the
+# clone, reads the clone's manifests, and is invoked by the Worker after the provisioner.
+#
+# Both are invoked by the Worker (src/worker.ts), in order, once per wake where the mount is freshly
+# created. Nothing here starts them, nothing polls, and nothing runs in the background: they are two
+# foreground commands with a beginning and an end, which is what docs/COST.md requires.
+# ==================================================================================================
+COPY bin/dsh-provision.sh bin/dsh-state.sh /usr/local/libexec/
+RUN chmod 0755 /usr/local/libexec/dsh-provision.sh /usr/local/libexec/dsh-state.sh \
+ && ln -sf /usr/local/libexec/dsh-provision.sh /usr/local/bin/dsh-provision \
+ && ln -sf /usr/local/libexec/dsh-state.sh /usr/local/bin/dsh-state
 
-# The install, declarative and reproducible: corepack supplies pnpm at the version the lockfile was
-# written by (lockfileVersion 9.0 needs pnpm 9 or newer; 10.4.0 satisfies it and the lockfile declares
-# no packageManager field to pin), rather than a bespoke global install with its own version drift.
-# --frozen-lockfile so a lockfile that no longer resolves FAILS the build instead of quietly
-# installing something else. npm is the fallback when corepack or the registry is unreachable, which
-# is a weaker install (a hoisted node_modules from the same manifests) and is named as such.
-# ponytail: not verified by a build - there is no Docker on the machine this was written on. The
-# ceiling is reachability of the npm registry and of corepack's pnpm; the upgrade path, if corepack
-# ever fails here, is a committed pnpm tarball. The fallback exists so this cannot be a hard failure.
-RUN set -eux; \
-    for profile in /root/.dsh/profiles/*/; do \
-      [ -f "$profile/package.json" ] || continue; \
-      if command -v corepack >/dev/null 2>&1 \
-         && corepack enable >/dev/null 2>&1 \
-         && corepack prepare pnpm@10.4.0 --activate >/dev/null 2>&1 \
-         && (cd "$profile" && pnpm install --prod --frozen-lockfile); then \
-        echo "pnpm installed $profile from its frozen lockfile"; \
-      else \
-        echo "pnpm unavailable or the lockfile did not resolve; falling back to npm for $profile"; \
-        (cd "$profile" && npm install --omit=dev --no-audit --no-fund --no-package-lock); \
-      fi; \
-    done; \
-    npm cache clean --force 2>/dev/null || true; \
-    rm -rf /root/.npm /root/.cache /root/.pnpm-store /root/.local/share/pnpm /root/.local/share/pnpm-store
-# --prod / --omit=dev above: the profile is RUN, never built. Its dev dependencies are a build-time
-# concern and were the largest single contributor to the image overshooting the limit.
-# Shipping a linter to a shell container is not a feature.
-#
-# The cache removal is INSIDE this RUN on purpose: a later `RUN rm -rf` does not shrink the image,
-# because Docker layers are additive and the bytes stay in the layer that created them. Deletion has
-# to happen in the same layer as the creation, or it only reclaims runtime disk.
-# ==================================================================================================
-# END AGENT WORKSPACE CONFIGURATION
-# ==================================================================================================
-
-# ==================================================================================================
-# Reclaim the build's own weight.
-#
-# The first build of this image was 2233 MB against the platform's 2000 MB limit, so it deployed
-# nowhere. This layer removes what the build needed but the running container does not: the npm and
-# pnpm caches, mise's downloads and its cache, pip's wheel cache, and any stray package lists.
-# Nothing here changes what the container can do — it deletes only things that would be re-fetched
-# on demand, if ever. Build output is kept honest by running this LAST, so it also sweeps the
-# layers added by the agent configuration above.
-#
-# The disk figure is what this is really about: the container provisions 2 GB of disk on `lite` and
-# the image is billed against that. A thin image is a cheaper image, and cold starts are shorter.
-# ==================================================================================================
-RUN set -eux; \
-    npm cache clean --force 2>/dev/null || true; \
-    rm -rf \
-      /root/.npm \
-      /root/.cache \
-      /root/.local/share/mise/downloads \
-      /root/.local/share/pnpm/store \
-      /root/.pnpm-store \
-      /tmp/* \
-      /var/tmp/* \
-      /var/lib/apt/lists/* \
-      /var/cache/apt/*; \
-    find / -xdev -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+# There is deliberately NO final "reclaim the build's weight" layer any more. There is nothing left
+# to reclaim: no npm, pnpm, pip or mise cache is created during the build, because no dependency tree
+# is installed during the build. The two apt layers purge their archives in their own RUN, which is
+# where it counts. A later cleanup layer was measured at 0 B of image and changed only the runtime
+# filesystem, which is why it is gone rather than kept for the look of it. Runtime hygiene for the
+# first-run install lives in `reclaim()` in bin/dsh-provision.sh, and its comment says the same.
 
 # Documentation only: the platform reads the port from the Durable Object, not from this line.
 EXPOSE 8080
