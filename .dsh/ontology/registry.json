@@ -186,11 +186,11 @@
     "planned_stale_days": 30,
     "entries": [
       {
-        "logical_id": "dev.tooling.dsh.shell",
+        "logical_id": "shared.tooling.dsh.shell",
         "provider_names": {
-          "cloudflare_worker": "dev-tooling-dsh-shell",
-          "hostname": "dev-dsh.alphaville.space",
-          "r2_bucket": "af-dev-tooling-dsh"
+          "cloudflare_worker": "shared-tooling-dsh-shell",
+          "hostname": "dsh.alphaville.space",
+          "r2_bucket": "af-shared-tooling-dsh"
         },
         "owner": "alphaville@agentmail.to",
         "contact": "dev@alphaville.space",
@@ -200,20 +200,20 @@
           {
             "provider": "cloudflare",
             "namespace": "alphaville-agency",
-            "provider_ref": "workers/dev-tooling-dsh-shell"
+            "provider_ref": "workers/shared-tooling-dsh-shell"
           },
           {
             "provider": "cloudflare",
             "namespace": "alphaville-agency",
-            "provider_ref": "r2/af-dev-tooling-dsh"
+            "provider_ref": "r2/af-shared-tooling-dsh"
           },
           {
             "provider": "cloudflare",
             "namespace": "alphaville-agency",
-            "provider_ref": "dns/dev-dsh.alphaville.space"
+            "provider_ref": "dns/dsh.alphaville.space"
           }
         ],
-        "source_ref": "registry:dev.tooling.dsh.shell",
+        "source_ref": "registry:shared.tooling.dsh.shell",
         "provisioning": [
           {
             "action": "created",
@@ -222,7 +222,7 @@
             "actor_kind": "agent",
             "means": "cli",
             "evidence": [
-              "evidence/provisioning/dev-tooling-dsh-shell.json"
+              "evidence/provisioning/shared-tooling-dsh-shell.json"
             ]
           }
         ],
@@ -235,9 +235,9 @@
         "no_consumers_reason": null
       },
       {
-        "logical_id": "dev.tooling.dsh.gateway",
+        "logical_id": "shared.tooling.dsh.gateway",
         "provider_names": {
-          "cloudflare_ai_gateway": "dev-tooling-dsh-gateway"
+          "cloudflare_ai_gateway": "shared-tooling-dsh-gateway"
         },
         "owner": "alphaville@agentmail.to",
         "contact": "dev@alphaville.space",
@@ -247,10 +247,10 @@
           {
             "provider": "cloudflare",
             "namespace": "alphaville-agency",
-            "provider_ref": "ai-gateway/dev-tooling-dsh-gateway"
+            "provider_ref": "ai-gateway/shared-tooling-dsh-gateway"
           }
         ],
-        "source_ref": "registry:dev.tooling.dsh.gateway",
+        "source_ref": "registry:shared.tooling.dsh.gateway",
         "provisioning": [
           {
             "action": "created",
@@ -259,13 +259,13 @@
             "actor_kind": "agent",
             "means": "api",
             "evidence": [
-              "evidence/provisioning/dev-tooling-dsh-gateway.json"
+              "evidence/provisioning/shared-tooling-dsh-gateway.json"
             ]
           }
         ],
         "consumers": [
           {
-            "consumer": "logical:dev.tooling.dsh.shell",
+            "consumer": "logical:shared.tooling.dsh.shell",
             "relationship": "invokes"
           }
         ],

@@ -12,7 +12,7 @@
     {
       "name": "r2",
       "durable": true,
-      "what": "The credential-less R2 binding mount (binding STATE, bucket af-dev-tooling-dsh) at /mnt/state. It is an s3fs FUSE mount, so it is much slower than local disk.",
+      "what": "The credential-less R2 binding mount (binding STATE, bucket af-shared-tooling-dsh) at /mnt/state. It is an s3fs FUSE mount, so it is much slower than local disk.",
       "useFor": "Anything that must survive a wake: installed skills, repositories, git worktrees and uncommitted work.",
       "ceiling": "The SDK mounts it with stat_cache_expire=60, enable_noobj_cache and multipart_size=5, and without use_cache, so file CONTENTS are never cached locally: every read and write is a round trip to R2. Stat results are cached for 60 seconds, which is what makes a repeated `git status` cheap and a first one expensive. Adding use_cache=/tmp/... to the mount options is the identified upgrade path for git-heavy work; it is not enabled because it is unverified without a container and it trades container disk for speed. See README.md, 'What survives a wake'."
     },

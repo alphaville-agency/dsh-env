@@ -1,18 +1,32 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "dev-tooling-dsh-shell",
+  "name": "shared-tooling-dsh-shell",
   "main": "src/worker.ts",
-  "compatibility_date": "2025-05-06",
+
+  // 2026-05-06 and not the earlier 2025-05-06 this repository used to pin.
+  //
+  // The R2 binding mount the next layer needs calls `ctx.exports.ContainerProxy` inside the
+  // Durable Object, and `ctx.exports` - the loopback bindings for the Worker's top-level exports -
+  // does not exist on a Durable Object's context before a compatibility date late in 2025. It is
+  // not a type, not a config key and not a missing export: the runtime simply does not put the
+  // property there, so the SDK's own export check throws InvalidMountConfigError and the request
+  // 500s. That was the 1101. Measured against the installed workerd, not read: at 2025-11-01 `ctx`
+  // has [facets, container, storage, id, props]; at 2025-12-01 it has those plus `exports`.
+  "compatibility_date": "2026-05-06",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true
   },
-  "vars": {
-    "SANDBOX_LOG_LEVEL": "info",
-    "AI_GATEWAY_URL": "https://gateway.ai.cloudflare.com/v1/ed5246df839f2f05c5ac88597e0f2177/dev-tooling-dsh-gateway/compat/chat/completions"
-  },
+
+  // One container class, and `name` is set so the container APPLICATION is a name we declare.
+  //
+  // Left unset, the platform derives the application name as `<worker>-<class-lowercased>`, which
+  // is `shared-tooling-dsh-shell-sandbox`: an SDK class name leaking into our namespace, and a name
+  // that silently changes if the class is ever renamed. README.md, "The container application
+  // name", records what was observed with this field set.
   "containers": [
     {
+      "name": "shared-tooling-dsh-shell-container",
       "class_name": "Sandbox",
       "image": "./container.Dockerfile",
       "instance_type": "lite",
@@ -24,44 +38,21 @@
       {
         "class_name": "Sandbox",
         "name": "Sandbox"
-      },
-      {
-        "class_name": "DshLease",
-        "name": "LEASE"
       }
     ]
   },
-  // v1 records what was already deployed: the hand-rolled `DshShell` Container class. It is kept, not
-  // rewritten, because a migration tag that has been applied cannot be redefined - the platform
-  // refuses it. v2 is therefore the change: the class is now the SDK's `Sandbox`, and the abandoned
-  // `DshShell` is deleted in the same migration so no trace of the replaced design is left bound.
-  //
-  // v3 is the input/awake lease and the terminal fan-out. It is a new tag because v1 and v2 have
-  // already been applied and cannot be redefined; `Sandbox` is untouched by it.
+  // v1, and only v1: this Worker name is new, so its Durable Object namespace is new too. There is
+  // no applied migration history to preserve and therefore no tombstones - the three tags the
+  // previous `shared-tooling-dsh-shell` Worker needed recorded its own history, not this one's.
   "migrations": [
     {
-      "new_sqlite_classes": ["DshShell"],
-      "tag": "v1"
-    },
-    {
       "new_sqlite_classes": ["Sandbox"],
-      "deleted_classes": ["DshShell"],
-      "tag": "v2"
-    },
-    {
-      "new_sqlite_classes": ["DshLease"],
-      "tag": "v3"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "STATE",
-      "bucket_name": "af-dev-tooling-dsh"
+      "tag": "v1"
     }
   ],
   "routes": [
     {
-      "pattern": "dev-dsh.alphaville.space",
+      "pattern": "dsh.alphaville.space",
       "custom_domain": true
     }
   ]

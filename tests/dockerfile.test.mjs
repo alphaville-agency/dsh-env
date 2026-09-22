@@ -6,11 +6,11 @@
 // the platform, not by wrangler's dry run. The only cheap place to catch a COPY that names something
 // that is not there is here, where the repository itself is the input.
 //
-// It checks two things and nothing speculative: every COPY source exists relative to the build
-// context, and every file this repository expects to run inside the image is executable-by-mode
-// after the chmod the Dockerfile performs (so a COPY of a 0600 script cannot ship as unrunnable).
+// At the FLOOR the image has no COPY at all - the base image plus one toolchain layer - so this file
+// pins that too. It is a gate with a purpose: adding a COPY back means updating the list of files
+// the image is allowed to expect, which is exactly the review the old broken COPY skipped.
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -41,27 +41,48 @@ function copyInstructions() {
   return found;
 }
 
-describe("container.Dockerfile: every COPY source exists in the repository", () => {
-  const instructions = copyInstructions();
-
-  it("has at least one COPY (the parser is reading the file)", () => {
-    assert.ok(instructions.length > 0, "no COPY lines found: the parser is wrong, not the Dockerfile");
+describe("container.Dockerfile: the base image is the official stable one", () => {
+  it("builds on the pinned stable Sandbox image", () => {
+    assert.match(
+      code,
+      /^FROM docker\.io\/cloudflare\/sandbox:0\.12\.9$/m,
+      "the image must build on the stable sandbox base the SDK is pinned to",
+    );
   });
 
+  it("overrides no entrypoint and no command", () => {
+    assert.ok(
+      !/^\s*(ENTRYPOINT|CMD)\b/m.test(code),
+      "the base image's entrypoint is the container runtime server; overriding it breaks exec",
+    );
+  });
+});
+
+describe("container.Dockerfile: every COPY source exists in the repository", () => {
   for (const { line, sources, destination } of copyInstructions()) {
     for (const source of sources) {
-      // `--from=` stage copies are not used here, but they name a stage rather than a path, and
-      // silently skipping them would be worse than failing loudly.
       it(`line ${line}: ${source} -> ${destination}`, () => {
         assert.ok(
           !source.startsWith("--"),
           `line ${line}: flags are not part of a source path, and this Dockerfile uses none`,
         );
-        const resolved = join(ROOT, source);
-        assert.ok(existsSync(resolved), `line ${line}: COPY source does not exist: ${source}`);
+        assert.ok(
+          existsSync(join(ROOT, source)),
+          `line ${line}: COPY source does not exist: ${source}`,
+        );
       });
     }
   }
+
+  it("copies nothing at all, because that is the floor", () => {
+    // Not a permanent rule: this is the gate that makes the next COPY a deliberate act with a
+    // source that exists, which is the failure this file was written for.
+    assert.deepEqual(
+      copyInstructions(),
+      [],
+      "the floor image copies nothing; when a layer needs a file in the image, add it to this test",
+    );
+  });
 });
 
 describe("container.Dockerfile: the things it removes stay removed", () => {
@@ -96,48 +117,6 @@ describe("container.Dockerfile: the things it removes stay removed", () => {
         body,
         /rm -rf [^\n]*\/var\/cache\/apt\/archives/,
         `the apt RUN at line ${index + 1} does not remove /var/cache/apt/archives in the same RUN`,
-      );
-    }
-  });
-});
-
-describe("container.Dockerfile: scripts are made executable by the image", () => {
-  const scripts = ["bin/dsh-provision.sh", "bin/dsh-state.sh"];
-
-  for (const script of scripts) {
-    it(`${script} is copied and chmod'd`, () => {
-      assert.ok(dockerfile.includes(script), `${script} is not copied into the image at all`);
-      assert.match(
-        dockerfile,
-        /chmod 0755[^\n]*dsh-provision\.sh/,
-        "the copied scripts are not chmod'd: they are 0600 in this repository",
-      );
-    });
-
-    it(`${script} parses as POSIX sh`, () => {
-      assert.ok(existsSync(join(ROOT, script)), `${script} does not exist`);
-      // The shebang is the contract: these run under `sh` on the image, not bash.
-      const first = readFileSync(join(ROOT, script), "utf8").split("\n")[0];
-      assert.equal(first, "#!/bin/sh", `${script} must declare #!/bin/sh`);
-    });
-  }
-
-  it("the chmod is load-bearing: these files are not executable in the repository", () => {
-    // Recorded rather than asserted as a failure. `bin/dsh-state.sh` is mode 0600 in the tree, so
-    // the COPY in the image copies a file nobody can execute; if the chmod line ever disappears the
-    // image builds and then fails at run time with "Permission denied" on a path that exists.
-    const modes = scripts.map((script) => statSync(join(ROOT, script)).mode & 0o111);
-    assert.ok(
-      modes.some((bits) => bits === 0) || modes.every((bits) => bits !== 0),
-      "unreachable: the point is that the chmod line exists, which the test above pins",
-    );
-  });
-
-  it("no COPY source points into the agent-state trees that were moved out", () => {
-    for (const gone of ["/opt/dsh-install", ".agents/local/"]) {
-      assert.ok(
-        !new RegExp(`^COPY .*${gone}`, "m").test(code),
-        `COPY of ${gone} is back; that path is either agent state or no longer exists`,
       );
     }
   });

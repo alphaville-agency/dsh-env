@@ -1,73 +1,59 @@
 # Instructions for an agent working in this workspace
 
-This repository is the **dsh developer environment** — a Cloudflare Container reached with
-`./dsh.sh`. It is not the agency, and the agency must never depend on it.
+This repository is the **dsh developer environment** — a Cloudflare Container reached through a
+Worker. It is not the agency, and the agency must never depend on it.
+
+## Where this is: the floor
+
+**Two routes are all that exist, and both are proven with real output** (README.md has the curl):
+
+- `GET /healthz` — liveness, and it deliberately does not start the container
+- `POST /run` — runs one command in the container and returns `{stdout, stderr, exitCode, success}`
+
+Everything else this workspace was designed to have — the input/awake lease Durable Object, the R2
+mount at `/mnt/state`, the first-run provisioner, the terminal and its client, the skills installer,
+APM — is parked on the **`archive/pre-floor-design`** branch. It is not deleted, and it is not
+coming back in bulk: it comes back one layer at a time, each verified against a working `/run`
+before the next one is added, and the first layer that breaks is where it stops.
+
+Do not describe a parked layer as working, and do not build on one. The reason all of it was parked
+is in README.md: not one command had ever executed in this container, so none of it had ever been
+observed to work.
 
 ## Resource discipline
 
 This box is deliberately small (`lite`: 1/16 vCPU, 256 MiB) and deliberately disposable. **Disk is
-ephemeral**: a sleeping container wakes with a fresh image, so `/workspace` and everything else
-outside `/mnt/state` is gone. Anything that must survive belongs in git, not here. Do not treat the
-filesystem as durable storage, because it is not.
+ephemeral**: a sleeping container wakes with a fresh image, so the filesystem outside a durable
+mount is gone. Anything that must survive belongs in git, not here. Do not treat the filesystem as
+durable storage, because it is not.
 
-## The container sleeps, by design — but working is not idle
+## The container sleeps, by design — and nothing may vote against that
 
-The container stops **5 minutes after its last activity** (`sleepAfter`, set in `src/worker.ts`).
-Idle is defined as **no work in progress**, not as "no keystrokes":
+The container stops **5 minutes after its last activity** (`sleepAfter`, set in `src/names.ts`).
+That is the entire cost control, and it is not negotiable from inside:
 
-- **An agent working toward a goal is active, and the container is kept awake for it — whether or
-  not a human is present and whether or not any client is attached.** Running tools, making model
-  calls and editing files is work. It declares that with `POST /work` (see below) and the workspace
-  holds `keepAlive` until the declaration ends.
-- **A session with no work in progress is idle**, and the container sleeps on the normal
-  `sleepAfter`. An attached-but-abandoned terminal is idle: an open window is not work.
-- **Nothing polls.** There is no heartbeat process, and that is deliberate: no `while true` loop, no
-  `curl` on a timer, no polling `GET /healthz` to stay alive, no "keepalive" service. A loop like
-  that converts "cost while I work" into "cost while I live", and it is the defect this environment
-  was rebuilt to remove. `docs/COST.md` has the arithmetic — read it before arguing with this.
-
-### Declaring work
-
-If you are an agent working inside the container without a human driving the terminal, bracket the
-work — the workspace cannot otherwise tell "thinking hard" from "nobody here":
-
-```sh
-TOKEN=$(curl -sS -X POST https://dev-dsh.alphaville.space/work \
-  -H 'content-type: application/json' -d '{"action":"begin"}' | jq -r .token)
-
-# ... do the work ...
-
-curl -sS -X POST https://dev-dsh.alphaville.space/work \
-  -H 'content-type: application/json' -d "{\"action\":\"end\",\"token\":\"$TOKEN\"}"
-```
-
-Two messages per unit of work, not a ping every 30 seconds. If the `end` is never sent — a crash —
-the declaration lapses on its own deadline (two hours) and the container sleeps as usual, so a
-forgotten signal costs at most that window rather than pinning the workspace awake forever.
-
-Expect to be shut down whenever **no work is in progress**, and expect `./dsh.sh` to wake you again.
-Waking is free and automatic: the request that opens the terminal is the wake-up.
-
-## If you are an agent working autonomously here
-
-- **Work with no human attached is active, not idle.** Declare it with `POST /work` as above, and the
-  container stays up for it. Do not substitute a keepalive loop for the declaration.
-- **An open terminal window is not work.** Attaching and then walking away is idle, and the workspace
-  will sleep.
-- **Long work belongs in a job with its own lifecycle.** This is an interactive workspace, not a
-  batch host. Anything that runs for hours belongs somewhere with its own schedule and its own
-  sleep policy, not in a container sized for a shell.
+- **Nothing polls.** No `while true` loop, no `curl` on a timer, no polling `GET /healthz` to stay
+  alive, no "keepalive" service, no daemon. A loop like that converts "cost while I work" into "cost
+  while I live", and it is the defect this environment exists to avoid. `docs/COST.md` has the
+  arithmetic — read it before arguing with this.
+- **`/healthz` must never touch the sandbox.** A probe that wakes a container is a heartbeat by
+  another name.
+- **Waking is free and automatic.** A request to `/run` starts a stopped container; there is no
+  separate start step to forget and no process needed to keep it alive.
 - **Commit before you stop.** Ephemeral disk means uncommitted work is lost on the next sleep, and
   the sleep is not announced.
-- **Push to a branch as you go.** Treat every moment as though the machine could vanish, because on
-  this one it can.
+
+When the awake lease comes back it will be the *only* thing permitted to extend `sleepAfter`, and
+only while something inside the container declares that work is in progress.
 
 ## Handling secrets
 
 Never commit a credential and never bake one into the image (`container.Dockerfile`). Non-secret
 configuration — instructions, toolchain declarations — belongs in the image as a committed file so
-it is reproducible and reviewable. Live credentials are injected at runtime from Worker secrets.
+it is reproducible and reviewable. Live credentials are injected at runtime from Worker secrets, or
+from the account's Secrets Store via its binding.
 
-**The workspace is currently unauthenticated.** Anyone who can reach the terminal URL gets a shell
-here. Do not treat this box as a secret store, and see the finding in `README.md` before putting
-anything sensitive in it.
+**There is no authentication on this Worker.** At the floor it runs whatever command it is given, so
+anyone who can reach `https://dsh.alphaville.space` can run a command in this container. That is a
+recorded finding, not an oversight — see "The unauthenticated Worker" in README.md. Do not put
+anything sensitive in this box.

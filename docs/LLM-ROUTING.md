@@ -39,7 +39,7 @@ id is the `cloudflare_ai_gateway` serialisation of the logical id — run
 
 | logical id | gateway id (used in URLs) | consumer | created |
 |---|---|---|---|
-| `dev.tooling.dsh.gateway` | `dev-tooling-dsh-gateway` | the dsh developer environment (this repository) | 2026-09-22 |
+| `shared.tooling.dsh.gateway` | `shared-tooling-dsh-gateway` | the dsh developer environment (this repository) | 2026-09-22 |
 | `dev.agency.inference.gateway` | `dev-agency-inference-gateway` | the agency | 2026-09-22 |
 
 An earlier name, `dev-agency-gateway`, was created and then deleted: it was three levels, not four,
@@ -82,7 +82,7 @@ Upstream URL: {base_url}/{provider-path}
 **Unified API** — provider-independent; only the model id changes:
 
 ```sh
-curl "https://gateway.ai.cloudflare.com/v1/ed5246df839f2f05c5ac88597e0f2177/dev-tooling-dsh-gateway/compat/chat/completions" \
+curl "https://gateway.ai.cloudflare.com/v1/ed5246df839f2f05c5ac88597e0f2177/shared-tooling-dsh-gateway/compat/chat/completions" \
   -H "Authorization: Bearer $CHEAPINFERENCE_API_KEY" \
   -H "cf-aig-authorization: Bearer $CF_AIG_TOKEN" \
   -H "Content-Type: application/json" \

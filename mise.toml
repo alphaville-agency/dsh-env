@@ -28,9 +28,10 @@ run = "mise install"
 description = "Show what is installed and what is missing"
 run = "mise ls"
 
-# Node's own test runner, so the suite adds no dependency. It covers the leases, which are pure
-# state machines in src/leases.ts, the Dockerfile's COPY sources, and the provisioning scripts'
-# contract. The sockets and the container are not reachable from here.
+# Node's own test runner, so the suite adds no dependency. At the floor it covers the Dockerfile:
+# its COPY sources, its base image and the things that stay out of it. The container, the sockets
+# and the Durable Object are not reachable from here, which is exactly why every layer above the
+# floor is proven against the deployed Worker and not against a local run.
 [tasks.test]
 description = "Run the test suite (Node's built-in test runner)"
 run = "node --test 'tests/**/*.test.mjs'"
