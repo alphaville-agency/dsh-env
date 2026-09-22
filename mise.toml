@@ -1,0 +1,18 @@
+# The workspace toolchain, declared rather than accumulated.
+#
+# The container's disk is ephemeral, so a tool installed by hand is gone at the next sleep. Rather
+# than syncing a mutable home directory, the toolchain is declared here and baked into the image by
+# CI: adding a tool is a commit, which is reproducible, reviewable and identical for every session.
+#
+# [tools]
+# ripgrep = "latest"
+# ast-grep = "latest"
+# uv = "latest"
+
+[tasks.install]
+description = "Install the declared toolchain"
+run = "mise install"
+
+[tasks.check]
+description = "Show what is installed and what is missing"
+run = "mise ls"
