@@ -74,43 +74,14 @@ describe("container.Dockerfile: every COPY source exists in the repository", () 
     }
   }
 
-  it("copies nothing beyond the provisioning scripts the Worker invokes", () => {
-    // A gate with a purpose. At the floor this list was EMPTY and that was pinned; layer 2 brings
-    // back exactly two files, so the list grew by exactly two. Every future COPY has to be added
-    // here deliberately, with a source that exists - which is the failure this file was written for.
-    const allowed = new Set(["bin/dsh-provision.sh", "bin/dsh-state.sh"]);
-    for (const { line, sources } of copyInstructions()) {
-      for (const source of sources) {
-        assert.ok(allowed.has(source), `line ${line}: COPY ${source} is not in the allowed set`);
-      }
-    }
-  });
-
-  it("makes every copied script executable, because they are 0600 in this repository", () => {
-    const scripts = copyInstructions()
-      .flatMap(({ sources }) => sources)
-      .filter((source) => source.endsWith(".sh"));
-    assert.ok(scripts.length > 0, "no scripts are copied: this check would pass vacuously");
-    for (const script of scripts) {
-      const name = script.split("/").pop();
-      assert.match(
-        code,
-        new RegExp(`chmod 0755[^\\n]*${name.replace(".", "\\.")}`),
-        `${name} is copied but not chmod'd, so the image ships a file nobody can execute`,
-      );
-    }
-  });
-
-  it("exposes the copied scripts on PATH under the names the Worker execs", () => {
-    // src/names.ts execs `dsh-provision` and `dsh-state` as bare commands, so a COPY into
-    // /usr/local/libexec with no symlink would deploy an image whose provisioner is unreachable.
-    for (const name of ["dsh-provision", "dsh-state"]) {
-      assert.match(
-        code,
-        new RegExp(`ln -sf /usr/local/libexec/${name}\\.sh /usr/local/bin/${name}`),
-        `${name} is copied but not linked onto PATH`,
-      );
-    }
+  it("copies nothing at all, because that is the floor", () => {
+    // Not a permanent rule: this is the gate that makes the next COPY a deliberate act with a
+    // source that exists, which is the failure this file was written for.
+    assert.deepEqual(
+      copyInstructions(),
+      [],
+      "the floor image copies nothing; when a layer needs a file in the image, add it to this test",
+    );
   });
 });
 

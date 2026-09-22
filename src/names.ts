@@ -52,24 +52,6 @@ export const STATE_MOUNT_PATH = "/mnt/state";
 export const MOUNT_ALREADY_IN_USE = "already in use";
 
 /**
- * The image's first-run provisioner, and the two commands that follow it.
- *
- * They are one sequence and the order is the contract the archived design states: the mount is the
- * state, `dsh-provision` installs the dependency trees into it from the clone's committed lockfiles,
- * and `dsh-state ensure` clones the repository, links the harness home and installs the skill
- * catalog. Both are idempotent and marker-guarded, so running them on a warm container is a few
- * checks and no network.
- *
- * They ship in the image rather than the clone on purpose - they have to run before the clone exists
- * - and the Worker ignores their exit codes: a registry outage must leave a usable shell with the
- * failure printed on it, because a container that refuses to start because npm was unreachable is
- * far worse than one without the TUI.
- */
-export const PROVISION_BIN = "dsh-provision";
-export const STATE_BIN = "dsh-state";
-export const STATE_ENSURE = "ensure";
-
-/**
  * Request and response field names. Protocol tokens stay inline; anything the JSON contract of
  * *this* Worker defines is named here.
  */

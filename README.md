@@ -31,7 +31,49 @@ added, and the tree stops at the first layer that breaks. See "What comes back, 
 
 ## The floor is proven, with output
 
-<!-- EVIDENCE -->
+Every line below is a real response from `https://dsh.alphaville.space`, made after the floor deploy
+(CI run 35704957777). Nothing here is a description of what the code should do.
+
+```
+$ curl -sS https://dsh.alphaville.space/healthz
+{"ok":true,"service":"shared-tooling-dsh-shell"}                                  [HTTP 200]
+
+$ curl -sS -X POST https://dsh.alphaville.space/run \
+    -H 'content-type: application/json' -d '{"command":"echo hello from the container"}'
+{"stdout":"hello from the container","stderr":"","exitCode":0,"success":true}     [HTTP 200, 5.3s cold]
+
+$ curl -sS -X POST .../run -d '{"command":"whoami; uname -srm; node --version; pwd"}'
+{"stdout":"root\nLinux 6.18.36-cloudflare-firecracker-2026.6.17 x86_64\nv22.23.2\n/workspace",
+ "stderr":"","exitCode":0,"success":true}
+
+$ curl -sS -X POST .../run -d '{"command":"ls /definitely-not-here"}'
+{"stdout":"","stderr":"ls: cannot access '/definitely-not-here': No such file or directory",
+ "exitCode":2,"success":false}                       # a real exit code, not a synthesised failure
+
+$ curl -sS -X POST .../run -d '{"command":""}'
+{"error":"command must be a non-empty string"}                                    [HTTP 400]
+```
+
+**It sleeps and it wakes.** Four requests, with the container's own boot id and `/proc/uptime` as the
+witness, and 400 seconds of silence in the middle (`sleepAfter` is 5 minutes):
+
+| when | boot id | uptime | latency |
+|---|---|---|---|
+| 08:36:59Z | `5f2b2131…` | 106s | 0.57s |
+| 08:37:03Z | `5f2b2131…` | 110s | 0.43s |
+| *…400s with no requests…* | | | |
+| 08:43:44Z | **`95d7780d…`** | 167s | **4.95s** |
+| 08:43:59Z | `95d7780d…` | 179s | 1.91s |
+
+A different boot id serves the request after the quiet period, its uptime has reset, and the request
+cost 4.95s against 0.43s warm: the container **stopped and came back**, and it came back on a
+request rather than on a timer. Two requests 15s apart share the new boot id and their uptimes
+advance together, so that is one instance, not two.
+
+*Not proven by this, stated plainly:* the fresh instance's uptime was already 88s and 167s in two
+runs, so it existed for tens of seconds before the first post-quiet request arrived. I did not
+determine what starts it at that moment — only that it is a different container each time and that
+no timer or daemon of ours is involved. The exact stop instant is the platform's business.
 
 ## The contract
 
