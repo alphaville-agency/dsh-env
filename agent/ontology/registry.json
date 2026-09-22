@@ -1,0 +1,334 @@
+{
+  "schema": "alphaville.resource-names.v2",
+  "version": "2026.09",
+  "statement": "A logical ID is platform-independent and has exactly four levels. Provider names are derived from it; a name that changes when the platform changes is not a logical name. No provider-specific identifier (account id, cluster, region) appears in a human-facing name. A resource with no legal logical ID is the reason names drift; if a facet has no place in the hierarchy, the hierarchy gains a level rather than the facet gaining an invented name. A provider name carries identity only - what the resource is. Ownership, contact, purpose, lifecycle, provenance and consumers are attributes of that name, never parts of it, and they are recorded against the name in claims.entries. `system` is the top-level operational scope whose outcome the resource directly serves, and it is the only scope axis: `scope` is the derived `system` segment, never a second field that could contradict it. Its four terms are agency (autonomous agency operation and control), product (customer-facing products and datasets), tooling (development or operational tools that are not runtime substrate) and infrastructure (shared compute, networking, storage, identity and delivery substrate). Classification is by direct beneficiary, not implementation type: a product database is product, not infrastructure, and storage shared by several systems is infrastructure. Provenance is recorded in the vocabulary of W3C PROV - the record is the entity, a provisioning event is the activity, actor and actor_kind name the agent, and evidence attests the activity - so this registry carries no parallel provenance theory of its own.",
+  "levels": {
+    "env": [
+      "dev",
+      "stg",
+      "prod"
+    ],
+    "system": [
+      "agency",
+      "product",
+      "tooling",
+      "infrastructure"
+    ],
+    "component": [
+      "console",
+      "control",
+      "acquire",
+      "map",
+      "merge",
+      "validate",
+      "publish",
+      "evidence",
+      "telemetry",
+      "dsh",
+      "catalogue",
+      "workspace",
+      "inference"
+    ],
+    "role": [
+      "api",
+      "worker",
+      "job",
+      "store",
+      "ledger",
+      "schedule",
+      "shell",
+      "dataset",
+      "space",
+      "manifest",
+      "gateway"
+    ]
+  },
+  "namespaces": {
+    "platform": "alphaville-agency",
+    "artifact": "alphaville-artifact",
+    "rule": "platform and shared capability under alphaville-agency; product and dataset under alphaville-artifact; the frozen reference keeps alphaville-foundry as a recorded exception; a resource violating this is refused",
+    "legacy_reference": "alphaville-foundry",
+    "system_allows": {
+      "alphaville-agency": [
+        "agency",
+        "tooling",
+        "infrastructure"
+      ],
+      "alphaville-artifact": [
+        "product"
+      ],
+      "alphaville-foundry": [
+        "agency",
+        "product",
+        "tooling",
+        "infrastructure"
+      ]
+    },
+    "system_allows_rule": "a namespace is chosen by the scope the resource serves, so a location must sit in a namespace whose system_allows list contains the record's system; alphaville-foundry is accepted for every system because it is frozen history rather than a live choice, and it is recorded here so it stops being copied by default"
+  },
+  "serialisations": {
+    "cloudflare_worker": {
+      "template": "{env}-{system}-{component}-{role}",
+      "pattern": "^[a-z0-9-]{3,63}$"
+    },
+    "cloudflare_ai_gateway": {
+      "template": "{env}-{system}-{component}-{role}",
+      "pattern": "^[a-z0-9-]{1,64}$",
+      "note": "the AI Gateway id shares the worker template deliberately: both are account-scoped resources in one flat namespace, so the same shape keeps them readable side by side. It is listed separately because the platform caps the id at 64 characters, not 63, and enforces its own character rules."
+    },
+    "hostname": {
+      "template": "{component}.alphaville.space",
+      "template_nonprod": "{env}-{component}.alphaville.space",
+      "pattern": "^[a-z0-9-]{1,63}(\\.[a-z0-9-]{1,63})+$",
+      "note": "prod owns the bare label; every other env is prefixed so two logical IDs cannot claim one hostname"
+    },
+    "r2_bucket": {
+      "template": "af-{env}-{system}-{component}",
+      "pattern": "^[a-z0-9-]{3,63}$"
+    },
+    "hf_dataset": {
+      "namespace": "artifact",
+      "template": "{component}",
+      "note": "the repository type already carries dataset-vs-space; do not encode it in the name"
+    },
+    "github_repo": {
+      "namespace": "platform",
+      "template": "{system}"
+    },
+    "image": {
+      "namespace": "platform",
+      "template": "{system}-{component}-{role}"
+    },
+    "env_prefix": {
+      "template": "AF_{env}_{system}_{component}_{role}",
+      "case": "upper"
+    }
+  },
+  "worked_example": {
+    "logical_id": "prod.agency.console.api",
+    "renders": {
+      "cloudflare_worker": "prod-agency-console-api",
+      "hostname": "console.alphaville.space",
+      "r2_bucket": "af-prod-agency-console",
+      "github_repo": "alphaville-foundry/agency",
+      "image": "ghcr.io/alphaville-foundry/agency-console-api",
+      "env_prefix": "AF_PROD_AGENCY_CONSOLE_API"
+    }
+  },
+  "singletons": {
+    "rule": "An account-level resource that exists once per upstream identity does not render from a logical ID: env, system, component and role do not apply to it, because it is not ours to name. It is recorded here so its name is fixed by decision rather than drifting by default. Recording it is what keeps the four-level rule honest; the alternative is inventing levels for a resource that has no place in our hierarchy.",
+    "entries": [
+      {
+        "resource": "cloudflare_ai_gateway_provider",
+        "name": "cheapinference",
+        "upstream_base_url": "https://api.cheaperinference.com",
+        "reason": "AI Gateway custom-provider slug. It names the upstream provider, not an Alphaville resource, so it carries the provider's own identity and deliberately has no env prefix: one slug serves every gateway on the account."
+      }
+    ]
+  },
+  "vocabularies": {
+    "rule": "Each closed vocabulary is defined here once and referenced by field name from the records and from the validator; a term list is never restated in a second place.",
+    "owner": [
+      "alphaville@agentmail.to"
+    ],
+    "contact": [
+      "dev@alphaville.space",
+      "admin@alphaville.space"
+    ],
+    "identity_rule": "an identity consumer is identity:<identity>, and the identity vocabulary is the union of owner and contact, so no identity is defined twice",
+    "lifecycle": [
+      "planned",
+      "active",
+      "retired"
+    ],
+    "action": [
+      "created",
+      "imported",
+      "changed",
+      "deleted"
+    ],
+    "actor_kind": [
+      "human",
+      "agent",
+      "ci"
+    ],
+    "means": [
+      "console",
+      "api",
+      "cli",
+      "iac"
+    ],
+    "relationship": [
+      "invokes",
+      "reads",
+      "writes",
+      "publishes",
+      "subscribes",
+      "operates"
+    ],
+    "provider": [
+      "cloudflare",
+      "github",
+      "huggingface",
+      "northflank"
+    ],
+    "no_consumers_code": [
+      "planned",
+      "retired"
+    ],
+    "consumer_rule": "a consumer is logical:<logical_id>, which must resolve to another record in this table, or identity:<identity>; an empty consumer list is forbidden, and a resource with no consumer must say so with no_consumers_reason, which is legal only when its code matches the lifecycle",
+    "source_rule": "source_ref is registry:<logical_id> when this registry record is the only declaration of the resource, repo:<path> for a declaration in this repository, or github:<owner>/<repo>/<path> for a declaration elsewhere; nothing else resolves",
+    "no_exemption_rule": "there is no foundational, internal, reserved-for-later or future-use exemption: a resource with no consumer is either planned or retired, or it is unused and refused"
+  },
+  "claims": {
+    "rule": "Every provider name this registry has been asked to reserve is recorded here with the logical ID that owns it and one authoritative resource record: who owns it, what it is for, where it lives, how it was provisioned and who consumes it. A name that is live on a platform but absent from this table is drift; the table is the record, not a decoration. occurred_at records the instant the provisioning act was recorded whenever the platform instant itself was not captured - each record's evidence file names that basis, so an approximate time is never presented as an observed one.",
+    "enforced_by": "names/validate.py --claims",
+    "planned_stale_days": 30,
+    "entries": [
+      {
+        "logical_id": "dev.tooling.dsh.shell",
+        "provider_names": {
+          "cloudflare_worker": "dev-tooling-dsh-shell",
+          "hostname": "dev-dsh.alphaville.space",
+          "r2_bucket": "af-dev-tooling-dsh"
+        },
+        "owner": "alphaville@agentmail.to",
+        "contact": "dev@alphaville.space",
+        "purpose": "Runs the cloud developer environment: the workspace an agent or the operator works in, which may disappear at any moment and which nothing in production may depend on.",
+        "lifecycle": "active",
+        "locations": [
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "workers/dev-tooling-dsh-shell"
+          },
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "r2/af-dev-tooling-dsh"
+          },
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "dns/dev-dsh.alphaville.space"
+          }
+        ],
+        "source_ref": "registry:dev.tooling.dsh.shell",
+        "provisioning": [
+          {
+            "action": "created",
+            "occurred_at": "2026-09-22T13:45:24+10:00",
+            "actor": "alphaville@agentmail.to",
+            "actor_kind": "agent",
+            "means": "cli",
+            "evidence": [
+              "evidence/provisioning/dev-tooling-dsh-shell.json"
+            ]
+          }
+        ],
+        "consumers": [
+          {
+            "consumer": "identity:dev@alphaville.space",
+            "relationship": "operates"
+          }
+        ],
+        "no_consumers_reason": null
+      },
+      {
+        "logical_id": "dev.tooling.dsh.gateway",
+        "provider_names": {
+          "cloudflare_ai_gateway": "dev-tooling-dsh-gateway"
+        },
+        "owner": "alphaville@agentmail.to",
+        "contact": "dev@alphaville.space",
+        "purpose": "Routes the dev environment's model calls to the cheapinference custom provider, so model traffic from the developer workspace has one named route.",
+        "lifecycle": "active",
+        "locations": [
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "ai-gateway/dev-tooling-dsh-gateway"
+          }
+        ],
+        "source_ref": "registry:dev.tooling.dsh.gateway",
+        "provisioning": [
+          {
+            "action": "created",
+            "occurred_at": "2026-09-22T15:33:27+10:00",
+            "actor": "alphaville@agentmail.to",
+            "actor_kind": "agent",
+            "means": "api",
+            "evidence": [
+              "evidence/provisioning/dev-tooling-dsh-gateway.json"
+            ]
+          }
+        ],
+        "consumers": [
+          {
+            "consumer": "logical:dev.tooling.dsh.shell",
+            "relationship": "invokes"
+          }
+        ],
+        "no_consumers_reason": null
+      },
+      {
+        "logical_id": "dev.agency.inference.gateway",
+        "provider_names": {
+          "cloudflare_ai_gateway": "dev-agency-inference-gateway"
+        },
+        "owner": "alphaville@agentmail.to",
+        "contact": "admin@alphaville.space",
+        "purpose": "The agency's own model route: the named AI Gateway the clean-slate build will call once it has a consumer.",
+        "lifecycle": "planned",
+        "locations": [
+          {
+            "provider": "cloudflare",
+            "namespace": "alphaville-agency",
+            "provider_ref": "ai-gateway/dev-agency-inference-gateway"
+          }
+        ],
+        "source_ref": "registry:dev.agency.inference.gateway",
+        "provisioning": [
+          {
+            "action": "created",
+            "occurred_at": "2026-09-22T15:33:27+10:00",
+            "actor": "alphaville@agentmail.to",
+            "actor_kind": "agent",
+            "means": "api",
+            "evidence": [
+              "evidence/provisioning/dev-agency-inference-gateway.json"
+            ]
+          }
+        ],
+        "consumers": null,
+        "no_consumers_reason": {
+          "code": "planned",
+          "detail": "Reserved for the clean-slate build: no runtime consumer calls this gateway yet, and no exemption is recorded for that, so it is planned until one does."
+        }
+      }
+    ]
+  },
+  "exceptions": [
+    {
+      "resource": "northflank project alphaville-foundry (legacy reference namespace)",
+      "reason": "reference implementation, frozen; not renamed for aesthetics"
+    },
+    {
+      "resource": "northflank services control, desk",
+      "reason": "reference implementation, frozen"
+    },
+    {
+      "resource": "northflank jobs initiative-worker, fixture-worker",
+      "reason": "reference implementation, frozen"
+    },
+    {
+      "resource": "northflank volume foundry-evidence",
+      "reason": "reference implementation, frozen"
+    }
+  ],
+  "uniqueness": {
+    "rule": "A provider name may be claimed by exactly one logical ID. Two logical IDs rendering onto the same provider name is refused, not resolved.",
+    "why": "hostname, r2 and hf serialisations omit logical-ID levels by design, so uniqueness has to be enforced by reservation rather than assumed from the ID.",
+    "enforcement": "the registry records claimed provider names; the validator rejects a second logical ID that renders onto an occupied name, naming both IDs and the name"
+  }
+}

@@ -1,69 +1,70 @@
 #!/bin/sh
-# Open the remote developer workspace.
+# The dsh developer workspace, from a terminal on your Mac.
 #
-#   ./dsh.sh            the harness TUI, as if it were local
-#   ./dsh.sh <command>  run one command and exit
+#   ./dsh.sh                 attach this terminal to the workspace and land in the dsh TUI
+#   ./dsh.sh <command...>    run one command in the workspace and print its output
 #
-# The workspace has no public port: access is `wrangler containers ssh`, authenticated against the
-# Cloudflare account with the ed25519 key in wrangler.jsonc. But SSH does not wake a stopped
-# container - documented behaviour, not an oversight - so this wakes it first and waits for it to
-# report healthy. That is why the wake lives here rather than in a separate step to remember.
+# With no argument the WebSocket upgrade is itself a request to the Worker, so the sandbox starts on
+# connect and stops five minutes after the last activity. Nothing polls to keep it up, by design:
+# see docs/COST.md.
 #
-# The container is on the `lite` instance and shuts down five minutes after its last request, so an
-# idle workspace costs nothing.
+# Environment: DSH_URL (the one-shot endpoint's origin), DSH_TERMINAL_URL (the WebSocket URL),
+# DSH_COMMAND (what the terminal runs; empty gives a bare shell).
 set -eu
 
-WORKER="${DSH_WORKER:-dev-tooling-dsh-shell}"
-URL="${DSH_WAKE_URL:-https://dev-dsh.alphaville.space}"
-KEY="${DSH_KEY:-$HOME/.ssh/alphaville_dsh}"
-USER_="${DSH_USER:-root}"
+URL="${DSH_URL:-https://dev-dsh.alphaville.space}"
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1"; exit 1; }; }
-need curl; need wrangler; need ssh
+# Waking a stopped container is a request round trip, not an instant, so give it room.
+POST_TIMEOUT=300
 
-app_id() {
-    wrangler containers list --json 2>/dev/null | python3 -c "
-import json,sys
-try:
-    for c in json.load(sys.stdin):
-        if c.get('name') == '$WORKER': print(c['id']); break
-except Exception: pass"
-}
+# The request field POST /run expects. The same name is COMMAND_FIELD in src/names.ts.
+COMMAND_KEY=command
 
-instance_id() {
-    wrangler containers instances "$1" --json 2>/dev/null | python3 -c "
-import json,sys
-try:
-    xs = json.load(sys.stdin)
-    xs = [x for x in (xs if isinstance(xs, list) else []) if x.get('state') in ('running','healthy')]
-    print(xs[0]['id'] if xs else '')
-except Exception: pass"
-}
+need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 1; }; }
 
-APP="$(app_id)"
-[ -n "$APP" ] || { echo "container application '$WORKER' not found"; exit 1; }
-
-# Wake it by touching the Worker. Any request starts the container and waits for its ports.
-if [ -z "$(instance_id "$APP")" ]; then
-    echo "waking $WORKER ..."
-    curl -fsS -m 180 "$URL" >/dev/null || { echo "could not wake it"; exit 1; }
+# Encode one shell string as a JSON string, and read one field back out of the reply. jq is the
+# first choice because it is the tool for this; python3 is the fallback, not an extra dependency.
+if command -v jq >/dev/null 2>&1; then
+    encode() { jq -Rs .; }
+    field() { jq -r --arg key "$1" '.[$key] // empty'; }
+elif command -v python3 >/dev/null 2>&1; then
+    encode() { python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
+    field() {
+        python3 -c 'import json,sys
+value = json.load(sys.stdin).get(sys.argv[1], "")
+sys.stdout.write("" if value is None else str(value))' "$1"
+    }
+else
+    echo "missing: jq or python3 (either one can encode the command)" >&2
+    exit 1
 fi
 
-ID=""
-for _ in $(seq 1 24); do
-    ID="$(instance_id "$APP")"
-    [ -n "$ID" ] && break
-    sleep 5
-done
-[ -n "$ID" ] || { echo "container did not become healthy"; exit 1; }
-
-# Proxy the real SSH client through wrangler's authenticated tunnel.
-if [ "$#" -gt 0 ]; then
-    exec ssh -t -i "$KEY" -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR \
-        -o "ProxyCommand=wrangler containers ssh --stdio %h" "$USER_@$ID" "$@"
+if [ "$#" -eq 0 ]; then
+    need node
+    exec node "$SELF_DIR/bin/dsh-client.mjs"
 fi
 
-# No argument: the harness TUI. A login shell first, so PATH includes mise.
-exec ssh -t -i "$KEY" -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR \
-    -o "ProxyCommand=wrangler containers ssh --stdio %h" "$USER_@$ID" \
-    'sh -lc "exec ${SHELL:-/bin/sh} -lc dsh"'
+need curl
+
+BODY=$(printf '%s' "$*" | encode | { printf '{"%s":' "$COMMAND_KEY"; cat; printf '}'; })
+
+# --fail-with-body so a rejection (a bad request, a failed start) is shown rather than swallowed.
+if ! RESP=$(curl -sS --fail-with-body -m "$POST_TIMEOUT" -X POST \
+        -H 'content-type: application/json' --data "$BODY" "$URL/run"); then
+    echo "the workspace could not run that: ${RESP:-no response}" >&2
+    exit 1
+fi
+
+OUT=$(printf '%s' "$RESP" | field stdout)
+ERR=$(printf '%s' "$RESP" | field stderr)
+CODE=$(printf '%s' "$RESP" | field exitCode)
+
+if [ -n "$OUT" ]; then printf '%s\n' "$OUT"; fi
+if [ -n "$ERR" ]; then printf '%s\n' "$ERR" >&2; fi
+
+# The container command's own exit code is this script's exit code.
+case "$CODE" in
+    ''|*[!0-9-]*) exit 1 ;;
+    *) exit "$CODE" ;;
+esac

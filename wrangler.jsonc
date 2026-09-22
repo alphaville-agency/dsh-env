@@ -1,39 +1,51 @@
 {
+  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "dev-tooling-dsh-shell",
   "main": "src/worker.ts",
-  "compatibility_date": "2026-09-01",
+  "compatibility_date": "2025-05-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "SANDBOX_LOG_LEVEL": "info",
+    "AI_GATEWAY_URL": "https://gateway.ai.cloudflare.com/v1/ed5246df839f2f05c5ac88597e0f2177/dev-tooling-dsh-gateway/compat/chat/completions"
+  },
   "containers": [
     {
-      "class_name": "DshShell",
-      "name": "dev-tooling-dsh-shell",
+      "class_name": "Sandbox",
       "image": "./container.Dockerfile",
       "instance_type": "lite",
-      "max_instances": 1,
-      "ssh": {
-        "enabled": true
-      },
-      "authorized_keys": [
-        {
-          "name": "dsh",
-          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC+FNHSJUqtrnnyea86mdZmXNZJ+c+4LXXtc9ml47eA2 dsh@alphaville.space"
-        }
-      ]
+      "max_instances": 1
     }
   ],
   "durable_objects": {
     "bindings": [
       {
-        "name": "DSH",
-        "class_name": "DshShell"
+        "class_name": "Sandbox",
+        "name": "Sandbox"
       }
     ]
   },
+  // v1 records what was already deployed: the hand-rolled `DshShell` Container class. It is kept, not
+  // rewritten, because a migration tag that has been applied cannot be redefined - the platform
+  // refuses it. v2 is therefore the change: the class is now the SDK's `Sandbox`, and the abandoned
+  // `DshShell` is deleted in the same migration so no trace of the replaced design is left bound.
   "migrations": [
     {
-      "tag": "v1",
-      "new_sqlite_classes": [
-        "DshShell"
-      ]
+      "new_sqlite_classes": ["DshShell"],
+      "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["Sandbox"],
+      "deleted_classes": ["DshShell"],
+      "tag": "v2"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "STATE",
+      "bucket_name": "af-dev-tooling-dsh"
     }
   ],
   "routes": [

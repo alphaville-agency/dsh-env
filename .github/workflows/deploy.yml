@@ -1,8 +1,8 @@
 # Deploys the Worker and builds the container image on GitHub's runners.
 #
-# GitHub's ubuntu runners have Docker, so the image is built here rather than on anyone's laptop —
-# and `@cloudflare/containers` is installed from package.json by `npm ci`, which is why the local
-# deploy failed to resolve it. Nothing about this repository needs anything installed locally.
+# GitHub's ubuntu runners already have Docker, which `wrangler deploy` needs to build the image, so
+# the build happens here rather than on anyone's laptop. `@cloudflare/sandbox` comes from the
+# committed lockfile, so nothing about this repository needs anything installed locally first.
 name: deploy
 
 on:
@@ -22,6 +22,7 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
