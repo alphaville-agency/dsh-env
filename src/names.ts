@@ -52,9 +52,25 @@ export const STATE_MOUNT_PATH = "/mnt/state";
 export const MOUNT_ALREADY_IN_USE = "already in use";
 
 /**
+ * s3fs flags passed to the mount.
+ *
+ * `nonempty` is the one that matters: a failed mount leaves the mountpoint directory behind
+ * and non-empty, and s3fs then refuses every later attempt with "MOUNTPOINT directory
+ * /mnt/state is not empty". That is a self-perpetuating failure - once it happens, the mount
+ * can never succeed again on that container, so durability is lost silently and permanently.
+ * The directory is ours and nothing else writes to it, so mounting over it is safe.
+ */
+export const S3FS_MOUNT_OPTIONS = ["nonempty"];
+
+/**
  * Request and response field names. Protocol tokens stay inline; anything the JSON contract of
  * *this* Worker defines is named here.
  */
+/** Reported when the durable mount failed but the command still ran. Never a silent field. */
+export const MOUNT_ERROR_FIELD = "mount_error";
+
+/** Request and response field names. Protocol tokens stay inline; anything the JSON contract of
+ * *this* Worker defines is named here. */
 export const COMMAND_FIELD = "command";
 export const SERVICE_FIELD = "service";
 export const OK_FIELD = "ok";

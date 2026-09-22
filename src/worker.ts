@@ -20,12 +20,14 @@ import {
   METHOD_GET,
   METHOD_POST,
   MOUNT_ALREADY_IN_USE,
+  MOUNT_ERROR_FIELD,
   OK_FIELD,
   ROUTE_HEALTHZ,
   ROUTE_RUN,
   SANDBOX_ID,
   SERVICE_FIELD,
   SERVICE_NAME,
+  S3FS_MOUNT_OPTIONS,
   SLEEP_AFTER,
   STATE_BINDING,
   STATE_MOUNT_PATH,
@@ -64,7 +66,9 @@ function sandboxFor(env: Env): Sandbox {
  */
 async function ensureStateMounted(sandbox: Sandbox): Promise<boolean> {
   try {
-    await sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {});
+    await sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {
+      s3fsOptions: S3FS_MOUNT_OPTIONS,
+    });
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -85,13 +89,32 @@ async function runCommand(request: Request, env: Env): Promise<Response> {
   }
 
   const sandbox = sandboxFor(env);
+  let mountFailure: string | null = null;
   // The mount is the durable state, and it does not survive the container being recreated, so it is
   // established on the way to every command. On a warm container this is one "already mounted" round
   // trip; on a cold one it is what makes /mnt/state exist before anything writes to it.
-  await ensureStateMounted(sandbox);
+  //
+  // A mount failure must not take the command with it. The mount buys durability; the shell is the
+  // product. Losing a command because the object store was unreachable is a strictly worse trade
+  // than running the command without durable state, so the error is reported and the command runs.
+  try {
+    await ensureStateMounted(sandbox);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    mountFailure = message;
+  }
 
-  const { stdout, stderr, exitCode, success } = await sandbox.exec(command);
-  return Response.json({ stdout, stderr, exitCode, success });
+  try {
+    const { stdout, stderr, exitCode, success } = await sandbox.exec(command);
+    return Response.json(
+      mountFailure === null
+        ? { stdout, stderr, exitCode, success }
+        : { stdout, stderr, exitCode, success, [MOUNT_ERROR_FIELD]: mountFailure },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return Response.json({ [ERROR_FIELD]: message, [MOUNT_ERROR_FIELD]: mountFailure }, { status: 502 });
+  }
 }
 
 /**
