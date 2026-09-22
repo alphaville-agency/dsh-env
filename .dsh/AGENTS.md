@@ -35,3 +35,6 @@ Full text: [`rules/one-writer-per-tree.md`](rules/one-writer-per-tree.md) — re
 ## A reference that does not resolve is the defect
 Full text: [`rules/dangling-references.md`](rules/dangling-references.md) — read it before documenting a command, path, skill or repository, before deleting or renaming anything something else names, and before creating a capability nothing consumes. Build the check, not the convention: an `AGENTS.md` pointing at a skill file that does not exist in the container, a `Dockerfile` `COPY`ing a deleted directory, and a registry example rendering a namespace that no longer exists all review as correct and fail silently.
 
+## The laptop builds the environment; the environment builds the agency
+Full text: [`rules/where-work-happens.md`](rules/where-work-happens.md) — read it before starting any agency, product or infrastructure work that is not about the environment itself. This laptop builds and operates the remote environment; clean-slate development happens inside it; the frozen legacy project is never resumed; and anything that cannot be done remotely is named as a limitation each time rather than assumed.
+
