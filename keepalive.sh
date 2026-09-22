@@ -1,52 +1,21 @@
 #!/bin/sh
-# Logs every step, and does not die with a component. A container that exits silently cannot be
-# diagnosed from outside - that lesson has been learned twice on this project already.
+# Runs inside the Cloudflare sandbox runtime, which owns the platform's health endpoint and port
+# verification. This only owns the shell, the state, and shutting down when nobody is working.
 set -u
 export HOME=/root
 IDLE_TIMEOUT="${DSH_IDLE_TIMEOUT:-1800}"
-
 log() { echo "[dsh] $*"; }
 
 log "starting"
 mkdir -p /run/sshd
+[ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A || log "host key generation failed"
 
-# Host keys: Alpine ships none, and sshd exits without them.
-if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
-    log "generating host keys"
-    ssh-keygen -A || log "host key generation failed"
-fi
-
-# The HTTP responder the platform health-checks. Started first so the check can pass even while the
-# shell is still coming up.
-python3 - <<'PY' &
-import http.server, socketserver
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        ok = self.path.rstrip('/').endswith('ping') or self.path == '/'
-        self.send_response(200 if ok else 404)
-        self.send_header('Content-Length', '2')
-        self.end_headers()
-        self.wfile.write(b'ok')
-    def log_message(self, *a): pass
-socketserver.TCPServer.allow_reuse_address = True
-socketserver.TCPServer(("", 8080), H).serve_forever()
-PY
-HEALTH=$!
-log "health responder on 8080 (pid $HEALTH)"
-
-# sshd in the foreground of its own process; its failure must not kill the container, or the reason
-# is lost with it.
 /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &
 SSHD=$!
 sleep 3
-if kill -0 "$SSHD" 2>/dev/null; then
-    log "sshd listening on 22 (pid $SSHD)"
-else
-    log "sshd FAILED; last output: $(tail -3 /tmp/sshd.log 2>/dev/null | tr '\n' ' ')"
-fi
+if kill -0 "$SSHD" 2>/dev/null; then log "sshd listening on 22"
+else log "sshd FAILED: $(tail -3 /tmp/sshd.log 2>/dev/null | tr '\n' ' ')"; fi
 
-# State persistence. Container disk is ephemeral; the harness's sessions, dotfiles and installed
-# tools are not disposable.
 if [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ]; then
     export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare
     export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
@@ -95,8 +64,4 @@ poll &
 
 trap 'log "stopping"; save_state' EXIT INT TERM
 
-# Stay alive regardless of what any single component does.
-while :; do
-    sleep 3600
-    if ! kill -0 "$HEALTH" 2>/dev/null; then log "health responder died; restarting"; fi
-done
+while :; do sleep 3600; done
