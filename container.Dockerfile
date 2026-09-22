@@ -38,3 +38,30 @@ RUN apt-get update \
       git curl jq ca-certificates \
  && apt-get clean \
  && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+
+# corepack, made reachable on PATH. This is a correctness fix rather than housekeeping: Node ships
+# corepack, but this base image symlinks only `npm` and `npx` into /usr/local/bin, so `corepack` is
+# not on PATH and a bare `command -v corepack` fails. Without it the profile installs cannot use
+# pnpm, `pnpm-lock.yaml` is quietly ignored, and a frozen-lockfile install silently becomes a
+# floating npm one - a reproducibility claim that is false because the mechanism never ran.
+#
+# Layer 2 needs it because layer 2 is the first layer that installs a node tree from a lockfile.
+RUN if ! command -v corepack >/dev/null 2>&1; then \
+      global_root="$(npm root -g 2>/dev/null || true)"; \
+      corepack_js="$global_root/corepack/dist/corepack.js"; \
+      if [ -f "$corepack_js" ]; then \
+        printf '#!/bin/sh\nexec node %s "$@"\n' "$corepack_js" > /usr/local/bin/corepack; \
+        chmod 0755 /usr/local/bin/corepack; \
+      fi; \
+    fi \
+ && command -v corepack \
+ && corepack --version
+
+# The two provisioning scripts. They ship in the IMAGE rather than in the clone on purpose: they have
+# to run before the clone exists, because installing is what makes the clone's manifests usable. They
+# are 0600 in the repository, so the chmod is load-bearing - a COPY without it ships a file nobody
+# can execute, and the failure appears only at run time. tests/dockerfile.test.mjs pins both facts.
+COPY bin/dsh-provision.sh bin/dsh-state.sh /usr/local/libexec/
+RUN chmod 0755 /usr/local/libexec/dsh-provision.sh /usr/local/libexec/dsh-state.sh \
+ && ln -sf /usr/local/libexec/dsh-provision.sh /usr/local/bin/dsh-provision \
+ && ln -sf /usr/local/libexec/dsh-state.sh /usr/local/bin/dsh-state

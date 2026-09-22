@@ -21,13 +21,16 @@ import {
   METHOD_POST,
   MOUNT_ALREADY_IN_USE,
   OK_FIELD,
+  PROVISION_BIN,
   ROUTE_HEALTHZ,
   ROUTE_RUN,
   SANDBOX_ID,
   SERVICE_FIELD,
   SERVICE_NAME,
   SLEEP_AFTER,
+  STATE_BIN,
   STATE_BINDING,
+  STATE_ENSURE,
   STATE_MOUNT_PATH,
 } from "./names";
 
@@ -73,6 +76,31 @@ async function ensureStateMounted(sandbox: Sandbox): Promise<boolean> {
   }
 }
 
+/**
+ * Prepare the container, in one order, on a container that has just been recreated.
+ *
+ * The mount comes first because it IS the state: the dependency trees are installed into it, so
+ * anything that runs before this step is writing somewhere that will not survive the wake.
+ *
+ * `dsh-provision` then installs the node dependency trees (the harness CLI and the TUI profile) into
+ * the mount from the committed lockfiles, and `dsh-state ensure` clones the repository, links the
+ * harness home and installs the skill catalog. Both are idempotent and marker-guarded in the mount,
+ * so on a warm container this is a few checks and no network.
+ *
+ * It must not gate the container coming up: a registry outage has to leave a usable shell with the
+ * failure printed on it, so the exit codes are deliberately ignored and the output is left on the
+ * terminal. Nothing here polls, retries, or outlives the request.
+ *
+ * ponytail: the two commands are awaited, so a cold start pays the install before the shell appears.
+ * The ceiling is the registry's latency on that one wake; the upgrade path, if the stall is ever the
+ * complaint, is `startProcess` for the second command and a marker the shell checks.
+ */
+async function prepareContainer(sandbox: Sandbox): Promise<void> {
+  if (!(await ensureStateMounted(sandbox))) return;
+  await sandbox.exec(`${PROVISION_BIN} || true`);
+  await sandbox.exec(`${STATE_BIN} ${STATE_ENSURE} || true`);
+}
+
 /** Run one command and hand back the buffered result. This request is what wakes the sandbox. */
 async function runCommand(request: Request, env: Env): Promise<Response> {
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
@@ -85,10 +113,10 @@ async function runCommand(request: Request, env: Env): Promise<Response> {
   }
 
   const sandbox = sandboxFor(env);
-  // The mount is the durable state, and it does not survive the container being recreated, so it is
-  // established on the way to every command. On a warm container this is one "already mounted" round
-  // trip; on a cold one it is what makes /mnt/state exist before anything writes to it.
-  await ensureStateMounted(sandbox);
+  // One request per wake in practice, so preparing here and again on the terminal path (when it
+  // comes back) costs a single "already in use" round trip and removes every ordering question about
+  // which came first.
+  await prepareContainer(sandbox);
 
   const { stdout, stderr, exitCode, success } = await sandbox.exec(command);
   return Response.json({ stdout, stderr, exitCode, success });
