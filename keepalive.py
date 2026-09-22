@@ -16,11 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-LEASE_DIR = Path(os.environ.get("DSH_LEASE_DIR", "/run/dsh-leases"))
+LEASE_DIR = Path(os.environ.get("DSH_LEASE_DIR", "/tmp/dsh-leases"))
 LEASE_TTL_SECONDS = float(os.environ.get("DSH_LEASE_TTL_SECONDS", "120"))
 TAILNET_PORT = int(os.environ.get("DSH_STATUS_PORT", "8787"))
 PUBLIC_PORT = int(os.environ.get("PORT", "10000"))
-TAILNET_STATE = os.environ.get("DSH_TAILNET_STATE", "/run/dsh-tailnet.json")
+TAILNET_STATE = os.environ.get("DSH_TAILNET_STATE", "/tmp/dsh-tailnet.json")
 
 
 def tailnet_address() -> str:

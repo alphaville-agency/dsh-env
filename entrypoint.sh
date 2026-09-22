@@ -19,7 +19,7 @@ export DSH_STATUS_PORT="$STATUS_PORT"
 python3 /work/keepalive.py &
 
 # 2. Join the tailnet. Failure is reported, not fatal.
-STATE_FILE="${DSH_TAILNET_STATE:-/run/dsh-tailnet.json}"
+STATE_FILE="${DSH_TAILNET_STATE:-/tmp/dsh-tailnet.json}"
 write_state() { printf '%s' "$1" > "$STATE_FILE" 2>/dev/null || true; }
 write_state '{"tailnet":"starting"}'
 TAILNET_IP=127.0.0.1

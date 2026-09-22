@@ -12,5 +12,5 @@ renew; poke
 HB=$!
 ( while :; do sleep 600; poke; done ) &
 PK=$!
-trap 'kill $HB $PK 2>/dev/null; rm -f "${DSH_LEASE_DIR:-/run/dsh-leases}/$LEASE_NAME"' EXIT INT TERM
+trap 'kill $HB $PK 2>/dev/null; rm -f "${DSH_LEASE_DIR:-/tmp/dsh-leases}/$LEASE_NAME"' EXIT INT TERM
 exec "${SHELL:-/bin/sh}" -l
