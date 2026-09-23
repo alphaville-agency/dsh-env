@@ -114,15 +114,32 @@ if [ "$SESSION" -eq 1 ]; then
     exec node "$SELF_DIR/bin/dsh-client.mjs"
 fi
 
-BODY=$(printf '%s' "$*" | encode | { printf '{"%s":' "$COMMAND_KEY"; cat; printf '}'; })
+BODY=$(printf '%s' "$COMMAND_KEY" >/dev/null; printf '%s' "$*" | encode | { printf '{"%s":' "$COMMAND_KEY"; cat; printf '}'; })
+
+run_remote() {
+    curl -sS --fail-with-body -m "$POST_TIMEOUT" -X POST \
+        -H 'content-type: application/json' \
+        -H "Authorization: Bearer $1" \
+        --data "$BODY" "$URL/run"
+}
 
 # --fail-with-body so a rejection (a bad request, a failed start) is shown rather than swallowed.
-if ! RESP=$(curl -sS --fail-with-body -m "$POST_TIMEOUT" -X POST \
-        -H 'content-type: application/json' \
-        -H "Authorization: Bearer $TOKEN" \
-        --data "$BODY" "$URL/run"); then
-    echo "the workspace could not run that: ${RESP:-no response}" >&2
-    exit 1
+if ! RESP=$(run_remote "$TOKEN"); then
+    # A cached token can be stale - the Worker's secret rotates on every session, and this machine
+    # may not have opened one since. Re-mint once and retry rather than reporting a 401 the caller
+    # cannot act on: the token is this script's to manage, so recovery belongs here too.
+    if printf '%s' "$RESP" | grep -q "unauthorised"; then
+        need wrangler
+        echo "[the cached token is stale; minting a new one]" >&2
+        TOKEN=$(publish_token)
+        if ! RESP=$(run_remote "$TOKEN"); then
+            echo "the workspace could not run that: ${RESP:-no response}" >&2
+            exit 1
+        fi
+    else
+        echo "the workspace could not run that: ${RESP:-no response}" >&2
+        exit 1
+    fi
 fi
 
 OUT=$(printf '%s' "$RESP" | field stdout)
