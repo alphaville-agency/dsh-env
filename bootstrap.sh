@@ -8,11 +8,9 @@
 #
 #   ... | sh -s -- uname -a    run one command instead of opening a session
 #
-# WHAT THIS NEEDS, AND WHY. An authenticated `gh` session to download the client, and an
-# authenticated `wrangler` because `dsh.sh` mints a fresh token and writes it to the Worker on every
-# session. That second requirement is not incidental: Cloudflare secrets are write-only, so there is
-# no token to read back and no shared secret to distribute - the credential is the ability to write
-# it. `node` is needed for the WebSocket client.
+# WHAT THIS NEEDS. An authenticated `gh` session to download the client, and `node` for the WebSocket
+# client. That is all: authentication to the workspace itself is a Cloudflare Access service token
+# that `dsh.sh` reads from ~/.dsh/access, and no `wrangler` is involved on this path.
 #
 # WHY A BOOTSTRAP RATHER THAN PIPING dsh.sh INTO A SHELL. `dsh.sh` ends by launching an interactive
 # TUI, and `curl ... | sh` hands the terminal's stdin to `sh` to read the script from. The TUI would
@@ -38,10 +36,8 @@ need() {
 need gh "install it from https://cli.github.com, or use brew install gh"
 need curl
 need node "node 22 or newer is required for the built-in WebSocket client"
-need wrangler "the session token is written to the Worker with 'wrangler secret put', so wrangler must be installed and authenticated"
 
 gh auth status >/dev/null 2>&1 || die "not authenticated: run 'gh auth login' first"
-wrangler whoami >/dev/null 2>&1 || die "wrangler is not authenticated: run 'wrangler login' first"
 
 DOWNLOAD_TOKEN=$(gh auth token) || die "could not read a token from the gh session"
 

@@ -6,11 +6,16 @@
 // `@cloudflare/sandbox/xterm` addon speaks, so a mismatch here would be a mismatch with the platform
 // rather than with a convention of ours.
 //
-// THE TOKEN IS REQUIRED AND IS SENT AS A HEADER. `wrangler secret` cannot read a value back, so
-// `dsh.sh` mints one, writes it to the Worker with `wrangler secret put`, and exports it here as
-// DSH_TOKEN. Node's built-in WebSocket takes a headers option (verified: the upgrade request carries
-// it), so the token travels as `Authorization: Bearer ...` and never in a query string, where it
-// would land in request logs.
+// AUTHENTICATION IS CLOUDFLARE ACCESS, and these two headers are the whole of it.
+//
+// The hostname sits behind an Access application with a service-token policy, so the edge refuses
+// anything that does not present a token and this client never sees an unauthenticated request get
+// through. That is why there is no bearer token here any more: the Worker used to compare one of its
+// own, which Cloudflare will not let anyone read back, so `dsh.sh` had to WRITE it on every session
+// with an authenticated `wrangler` - a dependency that failed the first time it met a wrangler that
+// was not v4. A service token is a credential the client can simply hold.
+//
+// Node's built-in WebSocket takes a headers option (verified: the upgrade request carries them).
 //
 // There is no input lease and no read-only mode. Those existed to arbitrate between several attached
 // clients, and they went with the lease Durable Object they depended on: the workspace is a singleton
@@ -18,7 +23,8 @@
 // out rather than imported because this file runs on the laptop, where nothing from src/ exists.
 
 const TERMINAL_URL = process.env.DSH_TERMINAL_URL ?? "wss://dsh.alphaville.space/ws/terminal";
-const TOKEN = process.env.DSH_TOKEN ?? "";
+const ACCESS_CLIENT_ID = process.env.CF_ACCESS_CLIENT_ID ?? "";
+const ACCESS_CLIENT_SECRET = process.env.CF_ACCESS_CLIENT_SECRET ?? "";
 const SHELL = process.env.DSH_SHELL ?? "";
 const SHELL_PARAM = "shell";
 
@@ -36,9 +42,10 @@ if (typeof WebSocket !== "function") {
   console.error("this client needs Node's built-in WebSocket (Node 22 or newer)");
   process.exit(1);
 }
-if (TOKEN === "") {
+if (ACCESS_CLIENT_ID === "" || ACCESS_CLIENT_SECRET === "") {
   console.error(
-    "DSH_TOKEN is not set. Run this through dsh.sh, which mints a token and writes it to the Worker.",
+    "the Cloudflare Access service token is not set. Run this through dsh.sh, which reads it from " +
+      "the environment and stops here if it is missing.",
   );
   process.exit(1);
 }
@@ -90,8 +97,13 @@ const size = () => ({
 const target = new URL(TERMINAL_URL);
 if (SHELL !== "") target.searchParams.set(SHELL_PARAM, SHELL);
 
-// The token goes in a header, not the URL.
-const socket = new WebSocket(target, { headers: { Authorization: `Bearer ${TOKEN}` } });
+// Sent as headers, never in the URL, where a credential would land in request logs.
+const socket = new WebSocket(target, {
+  headers: {
+    "CF-Access-Client-Id": ACCESS_CLIENT_ID,
+    "CF-Access-Client-Secret": ACCESS_CLIENT_SECRET,
+  },
+});
 socket.binaryType = "arraybuffer";
 
 let ready = false;
@@ -158,7 +170,7 @@ socket.addEventListener("error", () => {
   restore();
   process.stderr.write(
     `\n[could not reach ${TERMINAL_URL}]\n` +
-      "[a 401 here means the token the Worker holds has rotated; run ./dsh.sh to mint a new one]\n",
+      "[a 403 here means the Access service token is missing, expired or not in the policy]\n",
   );
   process.exit(1);
 });

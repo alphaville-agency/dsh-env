@@ -1,9 +1,11 @@
 // The Worker in front of the dsh developer workspace.
 //
-// Three routes. `GET /healthz` is liveness and deliberately does NOT touch the sandbox: a probe must
+// Two routes. `GET /healthz` is liveness and deliberately does NOT touch the sandbox: a probe must
 // never wake a stopped container, because a monitor that wakes it is a heartbeat by another name.
-// `POST /run` runs one command and returns its buffered output. `GET /ws/terminal` proxies a
-// WebSocket upgrade to the container's PTY, and is how a person actually works in here.
+// `GET /ws/terminal` proxies a WebSocket upgrade to the container's PTY, and is the only way in.
+//
+// There is no command endpoint. One existed, unauthenticated, and executed arbitrary commands as
+// root; see src/names.ts for why it is not coming back.
 //
 // The request IS the wake-up: touching the sandbox starts a stopped container on first use, so there
 // is no separate start step to forget. Nothing keeps it awake from the inside; it stops `sleepAfter`
@@ -17,29 +19,29 @@
 // `sleepAfter` set, an SSH-only design has no way back in after the first sleep. The upgrade being a
 // request is exactly the property SSH lacks.
 //
-// WHAT WAS REMOVED, AND WHY. This Worker previously served `/run` and `/ws/terminal` with NO
-// authentication. `POST /run` was measured answering 200 to an anonymous `curl` from the public
-// internet - an unauthenticated root shell behind a memorable hostname. Both routes now sit behind
-// a bearer check that FAILS CLOSED, and the check is the first thing that happens on every path.
+// AUTHENTICATION IS NOT HERE. It is Cloudflare Access, in front of the hostname, and that is
+// deliberate: an earlier version of this Worker carried its own bearer check, which meant a
+// hand-rolled credential compared in constant time, a token to distribute, and a second place for
+// it to be wrong. Access does it at the edge, for HTTP and for the WebSocket upgrade, and the
+// client holds a service token it can actually possess. One gate, not two.
+//
+// What this Cost: `/healthz` is now behind Access as well, because a pathless bypass policy
+// bypasses the whole application rather than one route. A liveness probe therefore needs the
+// service token; that is a smaller price than an administratively-open host to keep one route free.
 //
 // The lease Durable Object, the R2 mount and the provisioner are not coming back in their old form:
 // the lease had nothing to arbitrate for one operator, and s3fs was measured unusable three ways.
 import {
-  AUTH_TOKEN_ENV,
-  BEARER_PREFIX,
-  COMMAND_FIELD,
   DESCRIPTION_FIELD,
   ERROR_FIELD,
   METHOD_FIELD,
   METHOD_GET,
-  METHOD_POST,
   MODEL_KEY_ENV,
   OK_FIELD,
   ROUTES_FIELD,
   ROUTE_FIELD,
   ROUTE_HEALTHZ,
   ROUTE_ROOT,
-  ROUTE_RUN,
   ROUTE_TERMINAL,
   SANDBOX_ID,
   SERVICE_FIELD,
@@ -87,7 +89,6 @@ export { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
 export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
   STATE: R2Bucket;
-  [AUTH_TOKEN_ENV]?: string;
   [MODEL_KEY_ENV]?: string;
 }
 
@@ -144,65 +145,6 @@ async function injectModelKey(sandbox: Sandbox, env: Env): Promise<void> {
 }
 
 /**
- * The bearer check, and the FIRST thing every route does.
- *
- * It fails closed. If `DSH_TOKEN` is not set the Worker refuses every request rather than allowing
- * every request: an unconfigured deployment is a broken deployment, not an open shell. The other
- * half matters just as much - the token is compared with a constant-time compare, because an
- * ordinary `===` on a secret leaks its prefix through timing.
- */
-function isAuthorised(request: Request, env: Env): boolean {
-  const expected = env[AUTH_TOKEN_ENV];
-  if (typeof expected !== "string" || expected.length === 0) return false;
-
-  const header = request.headers.get("Authorization");
-  if (header === null || !header.startsWith(BEARER_PREFIX)) return false;
-
-  return constantTimeEquals(header.slice(BEARER_PREFIX.length), expected);
-}
-
-/**
- * Compare two strings without leaking WHERE they differ, in time or in early exit.
- *
- * Length is compared first and that is unavoidable - the length of the token is not the secret, and
- * everything after it is compared over the full span with no early return.
- */
-function constantTimeEquals(presented: string, expected: string): boolean {
-  const a = new TextEncoder().encode(presented);
-  const b = new TextEncoder().encode(expected);
-  if (a.length !== b.length) return false;
-
-  let difference = 0;
-  for (let index = 0; index < a.length; index += 1) {
-    difference |= a[index] ^ b[index];
-  }
-  return difference === 0;
-}
-
-/** Run one command and hand back the buffered result. This request is what wakes the sandbox. */
-async function runCommand(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-  const command = body?.[COMMAND_FIELD];
-  if (typeof command !== "string" || command.length === 0) {
-    return Response.json(
-      { [ERROR_FIELD]: `${COMMAND_FIELD} must be a non-empty string` },
-      { status: 400 },
-    );
-  }
-
-  const sandbox = sandboxFor(env);
-  await injectModelKey(sandbox, env);
-
-  try {
-    const { stdout, stderr, exitCode, success } = await sandbox.exec(command);
-    return Response.json({ stdout, stderr, exitCode, success });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return Response.json({ [ERROR_FIELD]: message }, { status: 502 });
-  }
-}
-
-/**
  * Liveness. Deliberately does not touch the sandbox: a probe must never wake a stopped container.
  *
  * Unauthenticated, and that is a decision rather than an oversight: it reports only that this Worker
@@ -223,7 +165,6 @@ function describe(): Response {
     [ROUTES_FIELD]: [
       { [ROUTE_FIELD]: ROUTE_ROOT, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "this description" },
       { [ROUTE_FIELD]: ROUTE_HEALTHZ, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "liveness; does not wake the sandbox" },
-      { [ROUTE_FIELD]: ROUTE_RUN, [METHOD_FIELD]: METHOD_POST, [DESCRIPTION_FIELD]: `one command, as {"${COMMAND_FIELD}": "..."}` },
       { [ROUTE_FIELD]: ROUTE_TERMINAL, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "interactive terminal; needs a WebSocket upgrade" },
     ],
   });
@@ -254,18 +195,9 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Liveness first, and only liveness is reachable without the token: a probe that needs a
-    // credential cannot be used by the platform, and this path cannot wake or run anything.
     if (request.method === METHOD_GET && url.pathname === ROUTE_HEALTHZ) return health();
 
-    if (!isAuthorised(request, env)) {
-      return new Response("unauthorised", { status: 401 });
-    }
-
     if (request.method === METHOD_GET && url.pathname === ROUTE_ROOT) return describe();
-    if (request.method === METHOD_POST && url.pathname === ROUTE_RUN) {
-      return await runCommand(request, env);
-    }
     if (url.pathname === ROUTE_TERMINAL) return await terminal(request, env);
 
     return new Response("not found", { status: 404 });

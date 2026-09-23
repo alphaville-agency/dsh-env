@@ -19,9 +19,14 @@ the cheapinference gateway, with the TUI's own token meter reporting `ctx 0.8% (
 
 | Route | What it does |
 |---|---|
-| `GET /healthz` | Liveness. **Does not start the container**, and is the only unauthenticated path. |
-| `POST /run` | Runs one command via `sandbox.exec(...)`, behind the bearer check. |
-| `GET /ws/terminal` | The product: an interactive PTY, started as `dsh-session`, behind the bearer check. |
+| `GET /healthz` | Liveness. **Does not start the container.** |
+| `GET /ws/terminal` | The product: an interactive PTY, started as `dsh-session`. The only way in. |
+
+There is no command endpoint. One existed - `POST /run`, which executed arbitrary commands as root -
+and it was measured answering 200 to an anonymous `curl` from the public internet. It briefly came
+back behind auth so the platform could be verified from a shell script, and that was the wrong shape:
+an endpoint that exists for the author's convenience is an arbitrary-command API on a public
+hostname, and the interface it stood in for already exists. Verification happens inside the session.
 
 The container carries the launcher, a `dsh-tui` profile built by the harness's own `dsh plugin add`,
 and the `settings.yaml` that points the harness at cheapinference. The model credential is a Worker
@@ -184,16 +189,22 @@ extend it — no daemon, no poll, no timer, no keepalive. `docs/COST.md` has the
 No credential is committed and none is baked into the image. Live secrets reach the Worker at runtime
 from Worker secrets, or from the account's Secrets Store through its binding.
 
-## Authentication
+## Authentication: Cloudflare Access
 
-`https://dsh.alphaville.space` **requires a bearer token** on every path except `/healthz`. The check
-fails closed - an unset token refuses everything rather than allowing everything - and compares in
-constant time.
+`dsh.alphaville.space` sits behind a Cloudflare Access application whose only policy admits a
+**service token**. The edge refuses everything else before a request reaches the Worker, for HTTP and
+for the WebSocket upgrade alike, and the policy is `non_identity` - it authorises a machine, not a
+person, so no browser login is involved.
 
-The token is minted by `dsh.sh` on every session and written to the Worker with `wrangler secret put`.
-Cloudflare secrets are write-only, so there is nothing to read back and no shared secret to
-distribute: the credential is the ability to write it, which is the same requirement as deploying.
-Rotating on start also makes the workspace a singleton.
+`dsh.sh` reads the token from `~/.dsh/access` (two lines: client id, then secret) and sends it as
+`CF-Access-Client-Id` / `CF-Access-Client-Secret`. It is not in this repository and not in the image.
 
-`/healthz` stays open on purpose. It reports only that the Worker exists, and it is incapable of
-waking the sandbox, so a liveness probe can never become a heartbeat.
+**The Worker has no auth of its own, on purpose.** An earlier version compared a bearer token: a
+hand-rolled credential, a secret to distribute, and a second gate beside the one the platform already
+provides. Two gates is not twice the safety; it is twice the places to be wrong.
+
+Two consequences worth knowing. `/healthz` is behind Access too - a pathless bypass policy bypasses
+the whole application rather than one route, so a liveness probe needs the token. And **Cloudflare
+secrets are write-only**: neither Worker secrets nor Secrets Store will hand a value back, so nothing
+can fetch a shared secret at run time. A service token works precisely because the client holds it
+rather than fetching it.

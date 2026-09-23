@@ -1,156 +1,86 @@
 #!/bin/sh
-# The dsh developer workspace, from a terminal on your laptop.
+# Open the dsh developer workspace, from a terminal on this machine.
 #
-#   ./dsh.sh                 open a new session and land in the dsh TUI
-#   ./dsh.sh <command...>    run one command in the workspace and print its output
+#   ./dsh.sh        open a session and land in the dsh TUI
 #
-# THE TOKEN IS MINTED HERE, ON EVERY SESSION, AND WRITTEN TO THE WORKER.
+# THAT IS THE WHOLE INTERFACE. There is no one-shot command mode, because there is no command
+# endpoint on the Worker: an earlier version served `POST /run`, which executed arbitrary commands as
+# root, and it existed for the developer's convenience in verifying things. The terminal is how a
+# person works in here, so the terminal is also how anyone verifies it.
 #
-# There is no shared secret to copy around and none to store. Cloudflare secrets are write-only -
-# `wrangler secret` has put/list/delete and no get, and the Secrets Store's `get` returns metadata
-# rather than a value - so a token that can be *read back* is not something the platform offers.
-# Rather than fight that, this script generates a fresh token, writes it to the Worker with
-# `wrangler secret put`, and uses it immediately. It needs an authenticated `wrangler` on this
-# machine, which is the same requirement as deploying, and it is the only credential involved.
+# AUTHENTICATION IS CLOUDFLARE ACCESS. The hostname is behind an Access application whose only policy
+# admits a service token, so the edge refuses everything else before it reaches the Worker - for HTTP
+# and for the WebSocket upgrade alike. This script reads that service token and passes it through.
 #
-# That is also what makes the workspace a SINGLETON. Opening a new session rotates the token, so any
-# older client can no longer authenticate: the old session is superseded the moment a new one starts,
-# and there is never a question of which window is authoritative. The trade-off, stated rather than
-# implied: an already-connected older client is not force-disconnected, because its socket is
-# established. It keeps working until it reconnects, and then it is refused. For one operator that is
-# the right side of the trade; forcibly closing live sockets would mean holding them, which is
-# machinery this environment does not otherwise need.
-#
-# The token is cached at $DSH_TOKEN_FILE so that one-shot commands do not pay for a `secret put`
-# round trip each time. A session rotates it; a command reuses it.
+# WHY THIS IS NOT A `wrangler` CALL ANY MORE. The first version of this script minted a token and
+# wrote it to the Worker with `wrangler secret put` on every session. That needed an authenticated
+# wrangler 4 on whatever machine you were on, and it failed the first time it met the deprecated
+# wrangler 1 - with an error about a config path, three steps away from the actual problem. There is
+# also nothing to read back: Cloudflare secrets and Secrets Store secrets are both write-only, so
+# "fetch the shared secret with wrangler" is not a thing this platform does. A service token is a
+# credential the client can hold, which is the difference that matters.
 #
 # Environment:
-#   DSH_URL            origin of the Worker            (default https://dsh.alphaville.space)
-#   DSH_TERMINAL_URL   WebSocket URL                   (default wss://dsh.alphaville.space/ws/terminal)
-#   DSH_COMMAND        what the terminal runs          (default `exec dsh`)
-#   DSH_TOKEN_FILE     where the token is cached       (default ~/.dsh/token)
-#   DSH_WORKER         Worker name for `secret put`    (default shared-tooling-dsh-shell)
+#   DSH_URL                  origin of the Worker   (default https://dsh.alphaville.space)
+#   DSH_TERMINAL_URL         WebSocket URL          (default wss://dsh.alphaville.space/ws/terminal)
+#   DSH_SHELL                what the PTY runs      (default: the image's dsh-session wrapper)
+#   DSH_ACCESS_FILE          where the token lives  (default ~/.dsh/access)
+#   CF_ACCESS_CLIENT_ID      override, or set these two directly
+#   CF_ACCESS_CLIENT_SECRET
 set -eu
 
-URL="${DSH_URL:-https://dsh.alphaville.space}"
-WORKER="${DSH_WORKER:-shared-tooling-dsh-shell}"
-TOKEN_FILE="${DSH_TOKEN_FILE:-$HOME/.dsh/token}"
+ACCESS_FILE="${DSH_ACCESS_FILE:-$HOME/.dsh/access}"
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-# Waking a stopped container is a request round trip, not an instant, so give it room.
-POST_TIMEOUT=300
-
-# The request field POST /run expects. Named in src/names.ts (COMMAND_FIELD); carried here only
-# because this script runs on the laptop, where nothing from src/ exists.
-COMMAND_KEY=command
-
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 1; }; }
-die() { echo "$*" >&2; exit 1; }
 
-# Encode one shell string as JSON and read one field back. jq first because it is the tool for this;
-# python3 is the fallback, not an extra dependency.
-if command -v jq >/dev/null 2>&1; then
-    encode() { jq -Rs .; }
-    field() { jq -r --arg key "$1" '.[$key] // empty'; }
-elif command -v python3 >/dev/null 2>&1; then
-    encode() { python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
-    field() {
-        python3 -c 'import json,sys
-value = json.load(sys.stdin).get(sys.argv[1], "")
-sys.stdout.write("" if value is None else str(value))' "$1"
+# The service token, read from a file that holds exactly two lines:
+#
+#   line 1  the client id,     e.g. 1a2b3c....access
+#   line 2  the client secret
+#
+# Written by whoever provisions the environment; never committed, never echoed.
+read_access_token() {
+    if [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && [ -n "${CF_ACCESS_CLIENT_SECRET:-}" ]; then
+        return 0
+    fi
+    [ -f "$ACCESS_FILE" ] || {
+        cat >&2 <<EOF
+the Cloudflare Access service token is not available.
+
+  expected: $ACCESS_FILE
+  containing two lines - the client id, then the client secret.
+
+That file is how you prove to the Access gate that you may reach the workspace. It is not in the
+repository and not in the image; whoever provisioned the environment has it.
+EOF
+        exit 1
     }
-else
-    die "missing: jq or python3 (either one can encode the command)"
-fi
-
-# A fresh token. 32 random bytes, hex, so it is safe in a header and safe in a shell variable.
-mint_token() {
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand -hex 32
-    else
-        need node
-        node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))'
-    fi
-}
-
-# Write the token to the Worker, and keep it locally so a one-shot command can reuse it.
-publish_token() {
-    token=$(mint_token)
-    printf '%s' "$token" | wrangler secret put DSH_TOKEN --name "$WORKER" >/dev/null 2>&1 \
-        || die "could not write DSH_TOKEN to the Worker '$WORKER' (is wrangler authenticated? run: wrangler whoami)"
-    mkdir -p "$(dirname "$TOKEN_FILE")"
-    (umask 077 && printf '%s' "$token" > "$TOKEN_FILE")
-    printf '%s' "$token"
-}
-
-# Reuse the cached token when there is one; the Worker refuses everything if it is stale, and the
-# caller sees a 401 rather than a mystery. One-shot commands do not need a new session.
-cached_token() {
-    [ -s "$TOKEN_FILE" ] && cat "$TOKEN_FILE"
-}
-
-# A session rotates; a command reuses.
-SESSION=0
-if [ "$#" -eq 0 ]; then
-    SESSION=1
-fi
-
-if [ "$SESSION" -eq 1 ]; then
-    need wrangler
-    TOKEN=$(publish_token)
-    echo "[new session: the workspace token has been rotated]" >&2
-else
-    need curl
-    TOKEN=$(cached_token)
-    if [ -z "$TOKEN" ]; then
-        need wrangler
-        TOKEN=$(publish_token)
-    fi
-fi
-export DSH_TOKEN="$TOKEN"
-
-if [ "$SESSION" -eq 1 ]; then
-    need node
-    exec node "$SELF_DIR/bin/dsh-client.mjs"
-fi
-
-BODY=$(printf '%s' "$COMMAND_KEY" >/dev/null; printf '%s' "$*" | encode | { printf '{"%s":' "$COMMAND_KEY"; cat; printf '}'; })
-
-run_remote() {
-    curl -sS --fail-with-body -m "$POST_TIMEOUT" -X POST \
-        -H 'content-type: application/json' \
-        -H "Authorization: Bearer $1" \
-        --data "$BODY" "$URL/run"
-}
-
-# --fail-with-body so a rejection (a bad request, a failed start) is shown rather than swallowed.
-if ! RESP=$(run_remote "$TOKEN"); then
-    # A cached token can be stale - the Worker's secret rotates on every session, and this machine
-    # may not have opened one since. Re-mint once and retry rather than reporting a 401 the caller
-    # cannot act on: the token is this script's to manage, so recovery belongs here too.
-    if printf '%s' "$RESP" | grep -q "unauthorised"; then
-        need wrangler
-        echo "[the cached token is stale; minting a new one]" >&2
-        TOKEN=$(publish_token)
-        if ! RESP=$(run_remote "$TOKEN"); then
-            echo "the workspace could not run that: ${RESP:-no response}" >&2
-            exit 1
-        fi
-    else
-        echo "the workspace could not run that: ${RESP:-no response}" >&2
+    CF_ACCESS_CLIENT_ID=$(sed -n '1p' "$ACCESS_FILE")
+    CF_ACCESS_CLIENT_SECRET=$(sed -n '2p' "$ACCESS_FILE")
+    if [ -z "$CF_ACCESS_CLIENT_ID" ] || [ -z "$CF_ACCESS_CLIENT_SECRET" ]; then
+        echo "$ACCESS_FILE must contain the client id on line 1 and the client secret on line 2" >&2
         exit 1
     fi
+    export CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET
+}
+
+if [ "$#" -gt 0 ]; then
+    cat >&2 <<EOF
+dsh.sh takes no arguments. It opens a session, and the only thing a session runs is the TUI.
+
+  ./dsh.sh
+
+There is deliberately no "run one command" mode: the Worker serves no command endpoint, because an
+endpoint that exists so a developer can verify things from a shell script is an arbitrary-command
+API on a public hostname. Run what you need inside the session.
+EOF
+    exit 2
 fi
 
-OUT=$(printf '%s' "$RESP" | field stdout)
-ERR=$(printf '%s' "$RESP" | field stderr)
-CODE=$(printf '%s' "$RESP" | field exitCode)
+need node
+read_access_token
 
-if [ -n "$OUT" ]; then printf '%s\n' "$OUT"; fi
-if [ -n "$ERR" ]; then printf '%s\n' "$ERR" >&2; fi
-
-# The container command's own exit code is this script's exit code.
-case "$CODE" in
-    ''|*[!0-9-]*) exit 1 ;;
-    *) exit "$CODE" ;;
-esac
+# Exec, so the TUI replaces this shell and owns the terminal: Ctrl-C and window-resize reach it
+# directly rather than through an intermediate process.
+exec node "$SELF_DIR/bin/dsh-client.mjs"

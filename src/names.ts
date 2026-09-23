@@ -46,16 +46,11 @@ export const SLEEP_AFTER = "5m";
  * exposes no `containers start`, so an SSH-only design has no way back in after the container
  * sleeps.
  *
- * `/run` runs one command and returns its buffered output. It stays because it is the verification
- * path - "does the remote environment work" must be answerable in one command from a laptop - and
- * because it is the contract every layer above this one was waiting on.
- *
- * Both are behind the same bearer check. What used to be here and is NOT coming back: these same
+ * Both are behind the bearer check. What used to be here and is NOT coming back: these same
  * two routes with NO authentication. `POST /run` was measured answering 200 to an anonymous `curl`
  * from the public internet, executing an arbitrary command as root. The shell is not a public API.
  */
 export const ROUTE_HEALTHZ = "/healthz";
-export const ROUTE_RUN = "/run";
 export const ROUTE_TERMINAL = "/ws/terminal";
 export const ROUTE_ROOT = "/";
 
@@ -79,31 +74,24 @@ export const TERMINAL_SHELL_DEFAULT = "dsh-session";
 export const TERMINAL_SHELL_ALLOWED = ["dsh-session", "bash", "sh"];
 
 /**
- * The environment variable holding the shared bearer token, and the prefix it arrives behind.
+ * There is no auth constant here, and that is the point.
  *
- * Declared as a Worker SECRET (never in `wrangler.jsonc`, never committed, never baked into the
- * image). Only one side of this is interesting: a request that does not present the token is
- * refused, and the check FAILS CLOSED if the secret is unset - an unconfigured Worker refuses
- * everything rather than allowing everything, because the failure mode of the other choice is a
- * public root shell.
- *
- * A single shared token is the honest amount of auth for one operator. It is not a user system, and
- * it is not pretending to be one. Cloudflare Access would be the better layer; the API for creating
- * the Access application returns 403 with the token this account has, and shipping a security
- * control that has never been exercised is worse than shipping a token that has been.
+ * Authentication is Cloudflare Access, in front of the hostname. This Worker used to compare a
+ * bearer token of its own, which meant a hand-rolled credential, a secret to distribute that
+ * Cloudflare will not let anyone read back, and a second gate beside the one the platform already
+ * provides. Access enforces both HTTP and the WebSocket upgrade at the edge, and the client holds a
+ * service token it can actually possess - so the only thing left to name here is nothing.
  */
-export const AUTH_TOKEN_ENV = "DSH_TOKEN";
 
 /**
  * The environment variable the harness reads its model credential from.
  *
  * The name is not ours to choose: the profile's settings.yaml declares
- * `apiKeyEnv: CHEAPINFERENCE_COM_API_KEY` for the cheapinference provider, so the container
- * must carry exactly this variable. It is a Worker SECRET, injected with setEnvVars, and it
- * never appears in this repository or in the image.
+ * `apiKeyEnv: CHEAPINFERENCE_COM_API_KEY`, so the container must carry exactly this variable.
+ * It is injected from a Worker secret with setEnvVars and never appears in this repository or
+ * in the image.
  */
 export const MODEL_KEY_ENV = "CHEAPINFERENCE_COM_API_KEY";
-export const BEARER_PREFIX = "Bearer ";
 
 /** HTTP methods we dispatch on, and the one WebSocket protocol token we compare. */
 export const METHOD_GET = "GET";
@@ -126,7 +114,6 @@ export const STATE_BINDING = "STATE";
  * Request and response field names. Protocol tokens stay inline; anything the JSON contract of
  * *this* Worker defines is named here.
  */
-export const COMMAND_FIELD = "command";
 export const SERVICE_FIELD = "service";
 export const OK_FIELD = "ok";
 export const ROUTES_FIELD = "routes";
