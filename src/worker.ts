@@ -34,6 +34,7 @@
 import {
   DESCRIPTION_FIELD,
   ERROR_FIELD,
+  GH_TOKEN_ENV,
   METHOD_FIELD,
   METHOD_GET,
   MODEL_KEY_ENV,
@@ -90,6 +91,7 @@ export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
   STATE: R2Bucket;
   [MODEL_KEY_ENV]?: string;
+  [GH_TOKEN_ENV]?: string;
 }
 
 /**
@@ -138,10 +140,20 @@ function sandboxFor(env: Env): Sandbox {
  * request instead would trade a usable workspace for a clear error message, which is the wrong way
  * round: the harness reports its own missing key far better than a 500 from here would.
  */
-async function injectModelKey(sandbox: Sandbox, env: Env): Promise<void> {
-  const key = env[MODEL_KEY_ENV];
-  if (typeof key !== "string" || key.length === 0) return;
-  await sandbox.setEnvVars({ [MODEL_KEY_ENV]: key });
+async function injectSecrets(sandbox: Sandbox, env: Env): Promise<void> {
+  const values: Record<string, string> = {};
+
+  const modelKey = env[MODEL_KEY_ENV];
+  if (typeof modelKey === "string" && modelKey.length > 0) values[MODEL_KEY_ENV] = modelKey;
+
+  // gh's credential. Its absence is not fatal: the environment still works as a shell, and the
+  // harness reports a missing model key far better than a failed request here would. What it costs
+  // is the ability to clone and push, which dsh-prime reports plainly when it runs.
+  const ghToken = env[GH_TOKEN_ENV];
+  if (typeof ghToken === "string" && ghToken.length > 0) values[GH_TOKEN_ENV] = ghToken;
+
+  if (Object.keys(values).length === 0) return;
+  await sandbox.setEnvVars(values);
 }
 
 /**
@@ -185,7 +197,7 @@ async function terminal(request: Request, env: Env): Promise<Response> {
 
   // The explicit session is what makes this type-safe; see TERMINAL_SESSION and SANDBOX_OPTIONS.
   const sandbox = sandboxFor(env);
-  await injectModelKey(sandbox, env);
+  await injectSecrets(sandbox, env);
 
   const session = await sandbox.getSession(TERMINAL_SESSION);
   return await session.terminal(request, { shell });

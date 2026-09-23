@@ -1,0 +1,82 @@
+#!/bin/sh
+# Fetch the repositories this environment works on.
+#
+#   dsh-prime            clone what is missing, fetch what is there
+#   dsh-prime --status   report only, change nothing
+#
+# WHY THIS IS A COMMAND AND NOT PART OF SESSION STARTUP. The container's disk is ephemeral: it resets
+# when the container sleeps, which happens five minutes after the last request. So a clone cannot be
+# baked in at build time and cannot be assumed to survive - it has to be re-established per session,
+# and doing that behind the TUI would put a network clone on the path to a prompt.
+#
+# So the rule is the honest one: **git is the source of truth, and work that is not pushed does not
+# exist.** Clone here, work, commit, push before you stop. `where-work-happens.md` is the long form.
+#
+# Authentication is GH_TOKEN, injected at run time as a Worker secret. Nothing here reads a
+# credential from disk, and nothing prints one.
+set -eu
+
+WORKSPACE="${DSH_WORKSPACE:-/workspace}"
+ORG="${DSH_ORG:-alphaville-agency}"
+STATUS_ONLY=0
+
+# The repositories worth having. `capability` is the one that matters for clean-slate work - it holds
+# the naming registry, the goals, the decisions and the rules the agency inherits.
+REPOS="agency tooling reference-implementation"
+
+[ "${1:-}" = "--status" ] && STATUS_ONLY=1
+
+say() { echo "$*" >&2; }
+
+if ! command -v gh >/dev/null 2>&1; then
+    say "gh is not installed, so the repositories cannot be fetched."
+    exit 1
+fi
+
+if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+    say "GH_TOKEN is not set. The environment could not clone or push without it."
+    say "It is a Worker secret; if it is missing, whoever provisioned this environment has not set it."
+    exit 1
+fi
+
+if ! gh auth status >/dev/null 2>&1; then
+    say "gh is not authenticated. GH_TOKEN is present but rejected - it may be expired or revoked."
+    exit 1
+fi
+
+mkdir -p "$WORKSPACE"
+cd "$WORKSPACE"
+
+for repo in $REPOS; do
+    dir="$WORKSPACE/$repo"
+    if [ -d "$dir/.git" ]; then
+        if [ "$STATUS_ONLY" -eq 1 ]; then
+            say "present: $repo"
+            continue
+        fi
+        # A fetch, not a pull: the container is disposable and a merge conflict on startup would be
+        # a worse greeting than being one commit behind.
+        if git -C "$dir" fetch --quiet --depth 1 origin 2>/dev/null; then
+            say "refreshed: $repo"
+        else
+            say "present (could not reach origin): $repo"
+        fi
+    else
+        if [ "$STATUS_ONLY" -eq 1 ]; then
+            say "MISSING: $repo"
+            continue
+        fi
+        if gh repo clone "$ORG/$repo" "$dir" -- --quiet --depth 1 2>/dev/null; then
+            say "cloned: $repo"
+        else
+            say "could not clone: $ORG/$repo"
+        fi
+    fi
+done
+
+if [ "$STATUS_ONLY" -eq 0 ]; then
+    say ""
+    say "The workspace is ephemeral: /workspace resets when the container sleeps."
+    say "Commit and push before you stop - unpushed work does not survive."
+fi
+cd "$WORKSPACE"

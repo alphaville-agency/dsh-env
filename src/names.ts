@@ -93,6 +93,16 @@ export const TERMINAL_SHELL_ALLOWED = ["dsh-session", "bash", "sh"];
  */
 export const MODEL_KEY_ENV = "CHEAPINFERENCE_COM_API_KEY";
 
+/**
+ * The environment variable gh reads its credential from.
+ *
+ * `GH_TOKEN` is what the GitHub CLI looks for, so the name is GitHub's rather than ours. It is
+ * injected from a Worker secret exactly like the model credential, and it is what lets a session
+ * clone and push - which is the whole of the durability story, because the container's disk
+ * resets on sleep and anything not pushed is gone.
+ */
+export const GH_TOKEN_ENV = "GH_TOKEN";
+
 /** HTTP methods we dispatch on, and the one WebSocket protocol token we compare. */
 export const METHOD_GET = "GET";
 export const METHOD_POST = "POST";

@@ -92,6 +92,19 @@ describe("container.Dockerfile: every COPY source exists in the repository", () 
       // the lockfile is what makes the resulting tree identical for every build.
       "dsh-install/package.json",
       "dsh-install/package-lock.json",
+      // The agent's own configuration. Without these the environment is a shell with a model and no
+      // idea how this project works: no rules, no naming registry, no model routing. They sat in the
+      // repository wired to nothing until this was added.
+      ".dsh/AGENTS.md",
+      ".dsh/MODEL-ROLES.md",
+      ".dsh/rules/",
+      ".dsh/ontology/",
+      // The skills the router names, so its references resolve in the container rather than only on
+      // a laptop.
+      "dsh-skills/",
+      // Fetches the repositories this environment works on. A command rather than session startup,
+      // because the disk resets on sleep and a clone at build time would be stale anyway.
+      "bin/dsh-prime",
     ];
 
     const actual = copyInstructions().flatMap(({ sources }) => sources).sort();

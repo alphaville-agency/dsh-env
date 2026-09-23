@@ -96,6 +96,22 @@ RUN npm install --global "pnpm@${PNPM_VERSION}" \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
+# gh, because this environment exists to work on repositories and cannot reach them without it.
+#
+# Installed from the official release tarball rather than the cli.github.com apt repository: the apt
+# route pulls an entire ICU stack and measured 187 MB, where the static binary is ~40 MB. Both are
+# verifiable; one is five times the size for the same command.
+#
+# It authenticates from GH_TOKEN, which is injected at run time as a Worker secret exactly like the
+# model credential - never baked, never in this repository.
+ARG GH_VERSION=2.101.0
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+      -o /tmp/gh.tgz \
+ && tar -xzf /tmp/gh.tgz -C /tmp \
+ && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
+ && rm -rf /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_amd64" \
+ && gh --version
+
 # The profile, installed the documented way.
 #
 # `dsh plugin --profile <name> add <bundle>` is how the harness itself populates a profile, and using
@@ -138,6 +154,40 @@ RUN node -e "const f='/root/.dsh/profiles/dsh-tui/package.json';const fs=require
 # It routes subagent children to a worker model instead of inheriting the parent route, which is a
 # cost and quality decision rather than a default - see the file itself.
 COPY dsh-profile/cordis.patch.yml /root/.dsh/profiles/dsh-tui/cordis.patch.yml
+
+# The agent's own configuration, which is what turns a shell with a model into a place that knows how
+# this project works.
+#
+# None of this reached the container before: it sat in the repository, wired to nothing, so a session
+# opened into a blank context with no rules and no naming registry. That is the "built and consumed
+# by nothing" defect in the one place it costs most, because the agent re-derives a different set of
+# conventions every time rather than inheriting the ones this project actually uses.
+#
+# Installed into $DSH_HOME, which is where the harness reads them, and the rules go in as a DIRECTORY
+# so a rule added later travels with no change here.
+COPY .dsh/AGENTS.md       /root/.dsh/AGENTS.md
+COPY .dsh/MODEL-ROLES.md  /root/.dsh/MODEL-ROLES.md
+COPY .dsh/rules/          /root/.dsh/rules/
+COPY .dsh/ontology/       /root/.dsh/ontology/
+
+# The skills the router names. Installing these where the harness discovers skills is what makes the
+# router's references resolve: an instruction that points at a skill which is not there reads as
+# correct and fails silently, which is the defect docs/rules/dangling-references.md exists for.
+COPY dsh-skills/          /root/.agents/skills/
+
+# A helper that fetches the repositories this environment works on. See its own header.
+COPY bin/dsh-prime        /usr/local/bin/dsh-prime
+RUN chmod 0755 /usr/local/bin/dsh-prime
+
+# Prove at build time that what the router points at is present. A dangling reference is cheap to
+# catch here and expensive to notice in a session.
+RUN test -f /root/.dsh/AGENTS.md \
+ && test -d /root/.dsh/rules \
+ && test -f /root/.dsh/ontology/registry.json \
+ && test -f /root/.agents/skills/plane/SKILL.md \
+ && test -x /usr/local/bin/dsh-prime \
+ && test -x /usr/local/bin/gh \
+ && test -x /usr/local/bin/dsh-session
 
 # Prove at build time that the harness runs and that the profile's bundle is actually present. An
 # image that builds and then cannot boot its own harness is the failure this environment has spent
