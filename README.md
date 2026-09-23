@@ -10,6 +10,25 @@ serves the agency's dev, stg and prod work alike. There is no `stg-dsh` and no `
 
 ---
 
+## Status: primed
+
+A session lands with everything the agency's work needs, verified inside the container:
+
+```
+rules=10  agents=yes  roles=yes  ontology=yes  plane=yes
+gh=2.101.0  ghtoken=set  modelkey=set
+cloned: agency  tooling  reference-implementation
+```
+
+Credentials reach the container as Worker secrets and never touch this repository or the image: the
+model key (`CHEAPINFERENCE_COM_API_KEY`) and gh's (`GH_TOKEN`).
+
+**Priming is the whole configuration the agent inherits.** Before this, the rules, the router, the
+model roles and the naming registry sat in this repository wired to nothing - so a session opened
+into a TUI with a model and no idea how the project works, and would re-derive a different set of
+conventions every time. `container.Dockerfile` now installs them, and the build asserts every path
+the router points at exists, so a dangling reference fails the build rather than a session.
+
 ## Status: working, and verified end to end
 
 The environment boots the harness, reaches a model, and holds a conversation. This was verified by
@@ -77,6 +96,22 @@ advance together, so that is one instance, not two.
 runs, so it existed for tens of seconds before the first post-quiet request arrived. I did not
 determine what starts it at that moment — only that it is a different container each time and that
 no timer or daemon of ours is involved. The exact stop instant is the platform's business.
+
+## Working in a session
+
+```sh
+./dsh.sh          # open the session
+dsh-prime         # fetch or refresh the repositories (first thing, every session)
+```
+
+`dsh-prime` is a command rather than session startup, deliberately: the container's disk resets when
+it sleeps, so a clone cannot be baked at build time and would be stale if it were, and running it
+behind the TUI would put a network clone on the path to a prompt.
+
+**The container is ephemeral.** It stops five minutes after the last request and `/workspace` is
+reset on the next wake. Git is the source of truth, and work that is not pushed does not exist -
+commit and push before you stop. `~/.dsh/rules/where-work-happens.md` is the long form, and it is in
+the image.
 
 ## The contract
 
