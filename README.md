@@ -10,24 +10,22 @@ serves the agency's dev, stg and prod work alike. There is no `stg-dsh` and no `
 
 ---
 
-## Status: the floor, and only the floor
+## Status: working, and verified end to end
 
-For its whole history this Worker had **never executed a single command end to end**. An hour of work
-went into image size, leases, provisioning, persistence, terminals and skills on top of a `/run` that
-returned `error code: 1101`. All of it was unverified, because the thing underneath it had never run.
-
-That layer is now parked on the **`archive/pre-floor-design`** branch, and this tree is the floor:
+The environment boots the harness, reaches a model, and holds a conversation. This was verified by
+connecting the same way `dsh.sh` does - authenticated WebSocket, `shell=dsh-session` - sending
+`Reply with exactly: CUTOVER-OK`, and receiving `CUTOVER-OK` back from `deepseek-v4.1-flash` through
+the cheapinference gateway, with the TUI's own token meter reporting `ctx 0.8% (8.3k/1.0m)`.
 
 | Route | What it does |
 |---|---|
-| `GET /healthz` | Liveness. **Does not start the container** — a probe that wakes it is a heartbeat by another name. |
-| `POST /run` | Runs one command via `sandbox.exec(...)` and returns `{stdout, stderr, exitCode, success}`. |
+| `GET /healthz` | Liveness. **Does not start the container**, and is the only unauthenticated path. |
+| `POST /run` | Runs one command via `sandbox.exec(...)`, behind the bearer check. |
+| `GET /ws/terminal` | The product: an interactive PTY, started as `dsh-session`, behind the bearer check. |
 
-That is the entire Worker. Nothing else is deployed: no lease Durable Object, no R2 mount, no
-provisioner, no symlinks, no terminal, no skills installer, no APM, no bootstrap.
-
-The next layers come back one at a time, each verified against a working `/run` before the next is
-added, and the tree stops at the first layer that breaks. See "What comes back, and in what order".
+The container carries the launcher, a `dsh-tui` profile built by the harness's own `dsh plugin add`,
+and the `settings.yaml` that points the harness at cheapinference. The model credential is a Worker
+secret, injected with `setEnvVars`; nothing about it is in this repository or in the image.
 
 ## The floor is proven, with output
 
@@ -153,26 +151,27 @@ in `.dsh/ontology/` with the hashes pinned in `PIN.json`.
 with — prefixing it would re-assert tiers that do not exist. The rule is generalised in the registry:
 the bare label belongs to whichever `env` is not subordinate to another env of the same system.
 
-## What is parked, and where
+## How the harness is installed, and why it took four attempts
 
-Everything below is on `archive/pre-floor-design`, unverified, and returns only one layer at a time:
+Each failure below was a different cause behind one symptom, and all four are recorded because the
+image rebuild is slow and the next person will meet them again.
 
-| Parked | Why it is not here |
-|---|---|
-| `src/lease-do.ts`, `src/leases.ts` | The input/awake lease DO. Most complex, least necessary: nothing to lease until a shell exists. |
-| `bin/dsh-provision.sh`, `bin/dsh-state.sh` | First-run provisioning and the config symlinks. Needs a working mount first. |
-| `src`-side mount code, `.dsh/persistence.json` | The R2 mount at `/mnt/state`. It was what the 1101 threw on the way to. |
-| `bin/dsh-client.mjs`, `dsh.sh`, `bootstrap.sh` | The terminal and its entry points. |
-| `apm.yml`, `apm.lock.yaml`, `.apm/`, `dsh-install/`, `.dsh/profiles/` | APM, and the node trees the provisioner installs — agent state, not image contents. |
-| `.github/workflows/image-report.yml` | The APM-era image report. |
-| `tools/sync.sh`, `tools/check-drift.sh` | Pre-APM tooling describing an `agent/` layout that no longer exists. |
+1. **The launcher could not install.** `@deepseek-ai/dsh`'s published tree requires
+   `@deepseek-ai/dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3`, which was never published. Fixed
+   with an npm `overrides` pin in a committed manifest and lockfile under `dsh-install/`.
+2. **The TUI is not a binary.** It is an out-of-tree mode bundle over `@deepseek-ai/dsh-base`, so
+   `npm install -g <tui>` installs nothing runnable. It belongs in a profile.
+3. **A hand-written profile built a second harness tree.** The bundle declares the harness packages as
+   PEER dependencies; npm auto-installs peers, pnpm does not (its `autoInstallPeers: false` is the
+   whole reason `dsh plugin add` is correct). Two trees meant two generations of the session codec,
+   and `SessionFormatError: encodeCurrent requires Session format v3`.
+4. **Supporting packages floated.** Pinning only the `dsh-*` names let `cordis`, `cordis-plugin-hmr`
+   and `cordis-plugin-timer` drift to newer versions that do not register the service names the
+   launcher looks up, so live patch watching failed. The overrides now come from every package in a
+   working tree - 241 of them - rather than from a name prefix.
 
-## What comes back, and in what order
-
-1. the R2 binding mount at `/mnt/state`, with a command that writes and reads a file there
-2. the node-tree persistence and the provisioner, with a warm start proven to skip it
-3. the terminal and `bin/dsh-client.mjs`
-4. the input/awake lease Durable Object — last, because it is the most complex and the least necessary
+Two of these were caused by the fix for the one before it, which is the argument for taking the
+versions from a setup known to work rather than reasoning about them.
 
 ## What it costs
 
@@ -185,10 +184,16 @@ extend it — no daemon, no poll, no timer, no keepalive. `docs/COST.md` has the
 No credential is committed and none is baked into the image. Live secrets reach the Worker at runtime
 from Worker secrets, or from the account's Secrets Store through its binding.
 
-## The unauthenticated Worker
+## Authentication
 
-`https://dsh.alphaville.space` has **no authentication**: at the floor, `POST /run` executes whatever
-command it is given for anyone who can reach the hostname. That is a recorded finding, not an
-oversight. An authentication gate is a layer that must be added before this box is trusted with
-anything, and it is deliberately not in the floor because the floor exists to prove the platform
-contract — not to be safe.
+`https://dsh.alphaville.space` **requires a bearer token** on every path except `/healthz`. The check
+fails closed - an unset token refuses everything rather than allowing everything - and compares in
+constant time.
+
+The token is minted by `dsh.sh` on every session and written to the Worker with `wrangler secret put`.
+Cloudflare secrets are write-only, so there is nothing to read back and no shared secret to
+distribute: the credential is the ability to write it, which is the same requirement as deploying.
+Rotating on start also makes the workspace a singleton.
+
+`/healthz` stays open on purpose. It reports only that the Worker exists, and it is incapable of
+waking the sandbox, so a liveness probe can never become a heartbeat.
