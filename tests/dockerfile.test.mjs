@@ -83,8 +83,6 @@ describe("container.Dockerfile: every COPY source exists in the repository", () 
       // The harness settings, and the profile that declares the TUI bundle. Without these the
       // container boots a launcher with no profile to run.
       "dsh-profile/settings.yaml",
-      "dsh-profile/package.json",
-      "dsh-profile/package-lock.json",
       "dsh-profile/cordis.patch.yml",
       // One program on PATH that boots the TUI on that profile, because the terminal route passes a
       // single program name rather than a command with arguments.

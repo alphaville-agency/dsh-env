@@ -71,28 +71,43 @@ RUN cd /opt/dsh-install \
  && rm -rf /root/.npm \
  && ln -sf /opt/dsh-install/node_modules/.bin/dsh /usr/local/bin/dsh
 
-# The profile's manifest, patch layer and the harness settings, all committed under dsh-profile/ so
-# the configuration the terminal boots with is reviewable in a diff like anything else.
-#
-# settings.yaml carries NO credential: the provider block names an environment variable
-# (`apiKeyEnv: CHEAPINFERENCE_COM_API_KEY`) and the value is injected at run time from a Worker
-# secret. That separation is the reason this file is safe to commit at all.
+# DSH_HOME is where the launcher looks for settings and profiles, and `dsh plugin add` writes
+# the profile beneath it. Declared before anything uses it so the build and the container agree.
 ENV DSH_HOME=/root/.dsh
 
-# The session wrapper: one program on PATH that boots the TUI on the committed profile. See
-# its own header for why the terminal runs a wrapper instead of a command with arguments.
+# The session wrapper: one program on PATH that boots the TUI on the committed profile. See its
+# own header for why the terminal runs a wrapper rather than a command with arguments.
 COPY bin/dsh-session /usr/local/bin/dsh-session
 RUN chmod 0755 /usr/local/bin/dsh-session
-COPY dsh-profile/settings.yaml     /root/.dsh/settings.yaml
-COPY dsh-profile/package.json dsh-profile/package-lock.json /root/.dsh/profiles/dsh-tui/
-COPY dsh-profile/cordis.patch.yml  /root/.dsh/profiles/dsh-tui/cordis.patch.yml
 
-# Materialise the profile's bundle tree from its committed manifest, and purge the cache in the same
-# layer. `--omit=dev` is not used here: the bundles are the runtime, not build-time tooling.
-RUN cd /root/.dsh/profiles/dsh-tui \
- && npm ci --no-audit --no-fund \
+# The profile, installed the documented way.
+#
+# `dsh plugin --profile <name> add <bundle>` is how the harness itself populates a profile, and using
+# it rather than a hand-written manifest is the difference between a profile that works and one that
+# only looks right. What it does that a plain `npm install` does not:
+#
+#   * it resolves the bundle against the LAUNCHER's tree, so the harness has one copy of itself;
+#   * it creates .dsh-module-fallback, which is how the profile reaches the launcher's packages.
+#
+# A hand-written manifest was tried first and failed with a SessionFormatError. The cause was that
+# `@deepseek-harness-tui/dsh-tui` declares the harness packages as PEER dependencies, and npm
+# auto-installs peers - so the profile got its own second copy of dsh-agent, dsh-session-format and
+# cordis, at versions that disagreed with the launcher's. Two trees, two generations of the same
+# codec, and a header that could not be encoded by the codec that received it.
+#
+# Pinning versions cannot fix that, which is why two rounds of pins changed nothing: the problem was
+# never a version, it was a duplicate tree.
+COPY dsh-profile/settings.yaml /root/.dsh/settings.yaml
+
+ARG DSH_TUI_BUNDLE=@deepseek-harness-tui/dsh-tui@0.10.1
+RUN dsh plugin --profile dsh-tui add "${DSH_TUI_BUNDLE}" \
  && npm cache clean --force \
  && rm -rf /root/.npm
+
+# The patch layer, copied AFTER the profile exists because `dsh plugin add` creates the directory.
+# It routes subagent children to a worker model instead of inheriting the parent route, which is a
+# cost and quality decision rather than a default - see the file itself.
+COPY dsh-profile/cordis.patch.yml /root/.dsh/profiles/dsh-tui/cordis.patch.yml
 
 # Prove at build time that the harness runs and that the profile's bundle is actually present. An
 # image that builds and then cannot boot its own harness is the failure this environment has spent
