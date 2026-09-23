@@ -120,6 +120,20 @@ RUN dsh plugin --profile dsh-tui add "${DSH_TUI_BUNDLE}" \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
+# Turn OFF live patch reloading, which is a laptop feature and cannot work here.
+#
+# `dsh plugin add` writes `patchReload: "live"`, the default for a custom profile, and live reload
+# requires the Cordis HMR service. HMR arrives as a DEV dependency, and this image runs with
+# NODE_ENV=production, so it is not installed - and the boot fails with
+# "user patch-layer watching requires the Cordis HMR service" before the TUI draws.
+#
+# Installing the dev tree to satisfy it would be the wrong fix: the profile is baked into the image
+# and nothing edits its patch layer at run time, so there is nothing to watch. `startup` reload is the
+# honest setting - the layer is applied when the profile boots, which is the only moment it can
+# change here.
+RUN node -e "const f='/root/.dsh/profiles/dsh-tui/package.json';const fs=require('fs');const d=JSON.parse(fs.readFileSync(f,'utf8'));d.dsh.profile.patchReload='startup';fs.writeFileSync(f,JSON.stringify(d,null,2)+'\n')" \
+ && node -e "const d=require('/root/.dsh/profiles/dsh-tui/package.json');if(d.dsh.profile.patchReload!=='startup'){throw new Error('patchReload was not set')}"
+
 # The patch layer, copied AFTER the profile exists because `dsh plugin add` creates the directory.
 # It routes subagent children to a worker model instead of inheriting the parent route, which is a
 # cost and quality decision rather than a default - see the file itself.
