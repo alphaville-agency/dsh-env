@@ -80,6 +80,22 @@ ENV DSH_HOME=/root/.dsh
 COPY bin/dsh-session /usr/local/bin/dsh-session
 RUN chmod 0755 /usr/local/bin/dsh-session
 
+# pnpm, because that is what the harness uses to manage profiles.
+#
+# `dsh plugin add` shells out to pnpm and fails with 127 without it, and the reason is not
+# incidental: pnpm's default is `autoInstallPeers: false`, and that setting is what makes the
+# documented install correct. npm auto-installs peer dependencies, so the profile's bundle - which
+# declares the harness packages as PEERS, expecting the launcher to supply them - gets its own
+# second copy of dsh-agent, dsh-session-format and cordis. A hand-written npm manifest produced
+# exactly that, and the two copies then disagreed about the session header format. The working
+# setup on the laptop has the same flag in its pnpm-lock.yaml.
+#
+# Pinned to the version that setup runs, so the profile resolves identically.
+ARG PNPM_VERSION=12.4.0
+RUN npm install --global "pnpm@${PNPM_VERSION}" \
+ && npm cache clean --force \
+ && rm -rf /root/.npm
+
 # The profile, installed the documented way.
 #
 # `dsh plugin --profile <name> add <bundle>` is how the harness itself populates a profile, and using
