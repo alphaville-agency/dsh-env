@@ -53,7 +53,8 @@ import {
   TERMINAL_SHELL_DEFAULT,
   WEBSOCKET_UPGRADE,
 } from "./names";
-import { getSandbox, type Sandbox, type SandboxOptions } from "@cloudflare/sandbox";
+import { getSandbox, type SandboxOptions } from "@cloudflare/sandbox";
+import type { Sandbox } from "./sandbox";
 
 /**
  * BOTH exports are required. The second is not optional, and its absence is what stopped this
@@ -85,7 +86,11 @@ import { getSandbox, type Sandbox, type SandboxOptions } from "@cloudflare/sandb
  * never mounts, so it never persists an outbound configuration. Any app that has ever mounted one
  * needs this export permanently.
  */
-export { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
+export { ContainerProxy } from "@cloudflare/sandbox";
+
+// Our Sandbox subclass, not the SDK's. It exists to save uncommitted work when the platform stops
+// the container - see src/sandbox.ts for why that is necessary and what it does and does not do.
+export { Sandbox } from "./sandbox";
 
 export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;

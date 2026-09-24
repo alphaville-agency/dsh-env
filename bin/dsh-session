@@ -1,22 +1,28 @@
 #!/bin/sh
-# What a session actually runs: the harness, on the dsh-tui profile.
+# What a session actually runs: prime the workspace, then the harness, on the dsh-tui profile.
 #
 # WHY THIS EXISTS RATHER THAN A COMMAND WITH ARGUMENTS. The terminal route passes the program to run
 # as a single name from an allowlist (see TERMINAL_SHELL_ALLOWED in src/names.ts), because that value
 # reaches the container as the process to execute and a value that can carry arguments is a command,
-# not a program. The alternative was to open a shell and type `dsh --profile dsh-tui` into it, which
-# is wrong for a session that survives a disconnect: the SDK keeps the PTY alive and replays its
-# output on reconnect, so the injected line would be typed into an already-running TUI.
+# not a program. The alternative was to open a shell and type a command into it, which is wrong for a
+# session that survives a disconnect: the SDK keeps the PTY alive and replays its output on reconnect,
+# so an injected line would be typed into an already-running TUI.
 #
-# This wrapper is the join between those two facts. It is one program on PATH, and the profile is
-# named here, in the image, where it can be reviewed.
+# PRIMING HAPPENS HERE, BEFORE THE TUI, and that is the correction that makes a session "primed"
+# rather than "primed if you remember". The container's disk resets when it sleeps, so the
+# repositories have to be re-established per session - and a session that opens into an empty
+# /workspace with no repositories is not ready to work, it is ready to fetch them. Putting the fetch
+# behind the TUI would mean the first thing every session does is a manual command, which is exactly
+# the kind of step that gets forgotten.
+#
+# It is bounded and it fails soft. `dsh-prime` fetches each repository at depth 1; on a warm
+# container with the clones present it is a handful of git fetches, and on a fresh one it is three
+# clones. If it fails - no network, no token - the TUI still opens and says so, because a session
+# that refuses to start because GitHub was unreachable is worse than a session without clones.
 #
 # The profile is `dsh-tui`, matching the committed dsh-profile/ manifest. `exec` so the TUI replaces
 # this shell rather than running underneath it - a TUI with a shell parent that outlives it is a
 # process nobody can reach.
-#
-# If the TUI cannot start, the reason must be visible. A silent exit would present as a terminal that
-# connects and immediately closes, which is indistinguishable from the container being broken.
 set -eu
 
 PROFILE="${DSH_PROFILE:-dsh-tui}"
@@ -31,5 +37,19 @@ if [ ! -d "${DSH_HOME:-/root/.dsh}/profiles/$PROFILE" ]; then
     echo "expected the committed dsh-profile/ tree to have been materialised at build time." >&2
     exec sh
 fi
+
+# Prime the workspace. Deliberately not silent: a session that spent thirty seconds fetching should
+# say what it was doing, and one that could not fetch should say that instead.
+if command -v dsh-prime >/dev/null 2>&1; then
+    echo "[priming the workspace: fetching the repositories it works on]"
+    if ! dsh-prime 2>&1 | sed 's/^/  /'; then
+        echo "  [priming did not finish. The session still works; run dsh-prime again inside it.]"
+    fi
+    echo "[workspace ready: $(ls -1 /workspace 2>/dev/null | wc -l | tr -d ' ') entries in /workspace]"
+else
+    echo "[dsh-prime is not on PATH, so the workspace was not fetched]" >&2
+fi
+
+echo
 
 exec dsh --profile "$PROFILE" "$@"
