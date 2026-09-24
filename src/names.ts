@@ -55,24 +55,18 @@ export const ROUTE_TERMINAL = "/ws/terminal";
 export const ROUTE_ROOT = "/";
 
 /**
- * What the terminal starts as, and the query parameter that may change it.
+ * What the terminal runs, and there is deliberately no way to ask for anything else.
  *
- * The PTY is started with this program rather than opening a shell and then typing a command into
- * it. Typing is the wrong shape for a session that survives a disconnect: the SDK keeps the PTY
- * alive and replays its output on reconnect, so an injected `dsh` would be typed into an already
- * running TUI - which is worse than useless, and would depend on the client guessing whether the
- * terminal it is attaching to is new. `PtyOptions.shell` is passed to the container when the PTY is
- * created, so reconnecting attaches to the same process with nothing sent.
+ * The terminal attaches to a STABLE session - that is what makes a reconnect replay the scrollback
+ * instead of starting over - and a session's shell is fixed when it is created. So a query
+ * parameter that chooses the shell means the FIRST caller decides for everyone: a probe that opened
+ * `shell=bash` left a bash session behind, and the next person to run `./dsh.sh` would have attached
+ * to that instead of the TUI.
  *
- * The value is checked against an allowlist instead of being passed through. It reaches the
- * container as the program to run, so an unvalidated value is a command, and "the caller is already
- * authenticated" is not a reason to hand it one - the authenticated caller is a terminal client, not
- * a shell.
+ * The earlier version had an allowlist to make the parameter safe. The allowlist was the wrong
+ * answer to the right instinct: the session's shell is not the client's business at all.
  */
-export const SHELL_PARAM = "shell";
-export const TERMINAL_SHELL_DEFAULT = "dsh-session";
-export const TERMINAL_SHELL_ALLOWED = ["dsh-session", "bash", "sh"];
-
+export const TERMINAL_SHELL = "dsh-session";
 /**
  * There is no auth constant here, and that is the point.
  *

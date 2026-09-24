@@ -17,6 +17,10 @@
 //
 // Node's built-in WebSocket takes a headers option (verified: the upgrade request carries them).
 //
+// THE SHELL IS NOT CHOSEN HERE. The session's shell is fixed server-side, because the session is
+// stable and shared: letting a client pick one means the first client to connect decides for
+// everyone, which is how a probe left a bash session where the TUI should have been.
+//
 // There is no input lease and no read-only mode. Those existed to arbitrate between several attached
 // clients, and they went with the lease Durable Object they depended on: the workspace is a singleton
 // and a new session rotates the token instead. The names below mirror src/names.ts; they are spelled
@@ -25,8 +29,6 @@
 const TERMINAL_URL = process.env.DSH_TERMINAL_URL ?? "wss://dsh.alphaville.space/ws/terminal";
 const ACCESS_CLIENT_ID = process.env.CF_ACCESS_CLIENT_ID ?? "";
 const ACCESS_CLIENT_SECRET = process.env.CF_ACCESS_CLIENT_SECRET ?? "";
-const SHELL = process.env.DSH_SHELL ?? "";
-const SHELL_PARAM = "shell";
 
 const MSG_READY = "ready";
 const MSG_RESIZE = "resize";
@@ -95,7 +97,6 @@ const size = () => ({
 });
 
 const target = new URL(TERMINAL_URL);
-if (SHELL !== "") target.searchParams.set(SHELL_PARAM, SHELL);
 
 // Sent as headers, never in the URL, where a credential would land in request logs.
 const socket = new WebSocket(target, {

@@ -47,10 +47,8 @@ import {
   SANDBOX_ID,
   SERVICE_FIELD,
   SERVICE_NAME,
-  SHELL_PARAM,
   SLEEP_AFTER,
-  TERMINAL_SHELL_ALLOWED,
-  TERMINAL_SHELL_DEFAULT,
+  TERMINAL_SHELL,
   WEBSOCKET_UPGRADE,
 } from "./names";
 import { getSandbox, type SandboxOptions } from "@cloudflare/sandbox";
@@ -193,19 +191,12 @@ async function terminal(request: Request, env: Env): Promise<Response> {
     return new Response("the terminal route needs a WebSocket upgrade", { status: 426 });
   }
 
-  // Which program the PTY runs. Defaults to the harness, because that is what this environment is
-  // for, and is restricted to the allowlist because the value is the program's name.
-  const requested = new URL(request.url).searchParams.get(SHELL_PARAM);
-  const shell = requested !== null && TERMINAL_SHELL_ALLOWED.includes(requested)
-    ? requested
-    : TERMINAL_SHELL_DEFAULT;
-
   // The explicit session is what makes this type-safe; see TERMINAL_SESSION and SANDBOX_OPTIONS.
   const sandbox = sandboxFor(env);
   await injectSecrets(sandbox, env);
 
   const session = await sandbox.getSession(TERMINAL_SESSION);
-  return await session.terminal(request, { shell });
+  return await session.terminal(request, { shell: TERMINAL_SHELL });
 }
 
 export default {
