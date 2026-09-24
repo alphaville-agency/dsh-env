@@ -50,6 +50,25 @@ else
     echo "[dsh-prime is not on PATH, so the workspace was not fetched]" >&2
 fi
 
+# Say where the work stands, from the repository rather than from a list kept here.
+#
+# This is deliberately derived: the build order lives in the agency repo's docs/HANDOVER.md, and a
+# status line maintained in this script would be a second place for it to drift. If the clone is not
+# there, say that instead of inventing a state.
+if [ -f /workspace/agency/docs/HANDOVER.md ]; then
+    echo "[clean-slate build]"
+    echo "  the goal, the decisions and the build order are in /workspace/agency/docs/:"
+    echo "    GOALS.md  DECISIONS.md  HANDOVER.md  ONTOLOGY.md  rules/"
+    # Show the numbered rungs so the next step is visible without opening anything.
+    sed -n '/^## Build order/,/^## /p' /workspace/agency/docs/HANDOVER.md 2>/dev/null \
+        | grep -E '^[0-9]+\.' \
+        | sed 's/^/    /' \
+        | head -6
+    echo "  Most recent commit on the capability repo:"
+    git -C /workspace/agency log -1 --format='    %h %s' 2>/dev/null || true
+else
+    echo "[the capability repository is not in /workspace, so the build state cannot be shown]"
+fi
 echo
 
 exec dsh --profile "$PROFILE" "$@"
