@@ -9,8 +9,14 @@
 # baked in at build time and cannot be assumed to survive - it has to be re-established per session,
 # and doing that behind the TUI would put a network clone on the path to a prompt.
 #
-# So the rule is the honest one: **git is the source of truth, and work that is not pushed does not
-# exist.** Clone here, work, commit, push before you stop. `where-work-happens.md` is the long form.
+# So the rule is the honest one: **git is the source of truth.** Clone here, work, commit, push.
+# `~/.dsh/rules/where-work-happens.md` is the long form.
+#
+# You do not have to remember to save before you stop. The platform announces a shutdown -
+# onActivityExpired() when the sleep timer fires, onStop() when the container exits - and the Worker
+# uses both to copy uncommitted changes and untracked files out to R2 before the disk is discarded.
+# That is a safety net for what was not pushed, not a substitute for pushing: the capture is a patch
+# in an object store, and pushed work is work.
 #
 # Authentication is GH_TOKEN, injected at run time as a Worker secret. Nothing here reads a
 # credential from disk, and nothing prints one.
@@ -77,6 +83,7 @@ done
 if [ "$STATUS_ONLY" -eq 0 ]; then
     say ""
     say "The workspace is ephemeral: /workspace resets when the container sleeps."
-    say "Commit and push before you stop - unpushed work does not survive."
+    say "Uncommitted work is copied to R2 automatically when the container stops, but pushing is"
+    say "still how work leaves this environment. The capture is a safety net, not a workflow."
 fi
 cd "$WORKSPACE"
