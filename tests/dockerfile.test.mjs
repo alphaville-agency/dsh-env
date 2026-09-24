@@ -171,3 +171,39 @@ describe("container.Dockerfile: the things it removes stay removed", () => {
     }
   });
 });
+
+describe("container.Dockerfile: build assertions are satisfiable", () => {
+  it("creates every path it asserts, before asserting it", () => {
+    // A build assertion that tests for a file created LATER in the file always fails, and it fails
+    // in the way this repository keeps being bitten by: the check reads as correct and the failure
+    // looks like something else. This caught a real instance - `test -f /root/.gitconfig` ran before
+    // the RUN that writes it.
+    const assertionIndex = lines.findIndex((line) => line.startsWith("RUN test -f /root/.dsh/AGENTS.md"));
+    assert.ok(assertionIndex > 0, "the build assertion was not found; this check would pass vacuously");
+
+    // Each asserted path, and a fragment of the instruction that creates it.
+    const creators = [
+      ["/root/.dsh/AGENTS.md", "COPY .dsh/AGENTS.md"],
+      ["/root/.dsh/rules", "COPY .dsh/rules/"],
+      ["/root/.dsh/ontology/registry.json", "COPY .dsh/ontology/"],
+      ["/root/.agents/skills/plane/SKILL.md", "COPY dsh-skills/"],
+      ["/root/.gitconfig", "git config --global user.name"],
+      ["/usr/local/bin/dsh-prime", "COPY bin/dsh-prime"],
+      ["/usr/local/bin/gh", "install -m 0755"],
+      ["/usr/local/bin/dsh-session", "COPY bin/dsh-session"],
+    ];
+
+    for (const [path, creator] of creators) {
+      const creatorIndex = lines.findIndex((line) => line.includes(creator));
+      assert.ok(
+        creatorIndex >= 0,
+        `${path} is asserted but nothing in the Dockerfile creates it (looked for: ${creator})`,
+      );
+      assert.ok(
+        creatorIndex < assertionIndex,
+        `${path} is asserted on line ${assertionIndex + 1} but created on line ${creatorIndex + 1}; ` +
+          "the assertion runs before its subject exists, so it can never pass",
+      );
+    }
+  });
+});

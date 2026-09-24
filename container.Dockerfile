@@ -185,6 +185,23 @@ COPY dsh-skills/          /root/.agents/skills/
 COPY bin/dsh-prime        /usr/local/bin/dsh-prime
 RUN chmod 0755 /usr/local/bin/dsh-prime
 
+# The identity is the ENTITY's, not the operator's, and that distinction is the point.
+#
+# The first version of this used the operator's personal GitHub account, because that is what
+# `gh auth token` happened to return on this machine. Anything committed from this environment
+# would then have been attributed to a person rather than to the agency - which is the line the
+# project's own rules draw: signing up AS the entity is authorised, acting as somebody else is
+# not.
+#
+# `alphaville@alphaville.space` is the domain the entity owns; Cloudflare routes it to the agency
+# inbox. A mail-provider address is the wrong form to publish in a commit: it exposes the
+# backend and is not the entity's identity.
+
+RUN git config --global user.name "Alphaville" \
+ && git config --global user.email "alphaville@alphaville.space" \
+ && git config --global init.defaultBranch main \
+ && git config --global --get user.email
+
 # Prove at build time that what the router points at is present. A dangling reference is cheap to
 # catch here and expensive to notice in a session.
 RUN test -f /root/.dsh/AGENTS.md \
@@ -204,10 +221,6 @@ RUN test -f /root/.dsh/AGENTS.md \
 #
 # Non-secret, so they belong in the image rather than in a secret: a name and an address on a commit
 # are published by design.
-RUN git config --global user.name "Alphaville" \
- && git config --global user.email "alphaville@alphaville.space" \
- && git config --global init.defaultBranch main \
- && git config --global --get user.email
 
 # The identity is the ENTITY's, not the operator's, and that distinction is the point.
 #
@@ -220,7 +233,7 @@ RUN git config --global user.name "Alphaville" \
 # inbox. A mail-provider address is the wrong form to publish in a commit: it exposes the backend and
 # is not the entity's identity.
 
-# Prove at build time that the harness runs# Prove at build time that the harness runs and that the profile's bundle is actually present. An
+# Prove at build time that the harness runs and that the profile's bundle is actually present. An
 # image that builds and then cannot boot its own harness is the failure this environment has spent
 # longest on, and it costs nothing to catch here instead of in a session.
 RUN command -v dsh \
