@@ -133,6 +133,7 @@ COPY dsh-profile/settings.yaml /root/.dsh/settings.yaml
 
 ARG DSH_TUI_BUNDLE=@deepseek-harness-tui/dsh-tui@0.10.1
 RUN dsh plugin --profile dsh-tui add "${DSH_TUI_BUNDLE}" \
+ && dsh plugin --profile web add @deepseek-ai/dsh-web-app \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
@@ -185,11 +186,37 @@ RUN test -f /root/.dsh/AGENTS.md \
  && test -d /root/.dsh/rules \
  && test -f /root/.dsh/ontology/registry.json \
  && test -f /root/.agents/skills/plane/SKILL.md \
+ && test -d /root/.dsh/profiles/web \
+ && test -f /root/.gitconfig \
  && test -x /usr/local/bin/dsh-prime \
  && test -x /usr/local/bin/gh \
  && test -x /usr/local/bin/dsh-session
 
-# Prove at build time that the harness runs and that the profile's bundle is actually present. An
+# Git identity, so a commit made in here is attributable rather than a failure.
+#
+# The container had no identity, which means `git commit` either refused or produced an
+# unattributed commit - the same class of gap as a missing credential, and just as invisible until
+# the moment it matters. The values are the identity this project already commits under.
+#
+# Non-secret, so they belong in the image rather than in a secret: a name and an address on a commit
+# are published by design.
+RUN git config --global user.name "Alphaville" \
+ && git config --global user.email "alphaville@alphaville.space" \
+ && git config --global init.defaultBranch main \
+ && git config --global --get user.email
+
+# The identity is the ENTITY's, not the operator's, and that distinction is the point.
+#
+# The first version of this used the operator's personal GitHub account, because that is what
+# `gh auth token` happened to return on this machine. Anything committed from this environment would
+# then have been attributed to a person rather than to the agency - which is the line the project's
+# own rules draw: signing up AS the entity is authorised, acting as somebody else is not.
+#
+# `alphaville@alphaville.space` is the domain the entity owns; Cloudflare routes it to the agency
+# inbox. A mail-provider address is the wrong form to publish in a commit: it exposes the backend and
+# is not the entity's identity.
+
+# Prove at build time that the harness runs# Prove at build time that the harness runs and that the profile's bundle is actually present. An
 # image that builds and then cannot boot its own harness is the failure this environment has spent
 # longest on, and it costs nothing to catch here instead of in a session.
 RUN command -v dsh \
