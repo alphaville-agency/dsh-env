@@ -114,6 +114,12 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_$
 
 # The profile, installed the documented way.
 #
+# ONE PROFILE, NOT TWO. This machine also has a `web` profile, and it is deliberately not installed
+# here: it is a browser UI, which needs a port. Containers have no public port except through a Worker
+# route, and this Worker exposes exactly one - the terminal. Adding the web profile would mean
+# exposing a second surface to make a local-only affordance work, which is the opposite of what the
+# environment is for. `dsh-tui` is the interface, and the access gate is why it can be.
+#
 # `dsh plugin --profile <name> add <bundle>` is how the harness itself populates a profile, and using
 # it rather than a hand-written manifest is the difference between a profile that works and one that
 # only looks right. What it does that a plain `npm install` does not:
@@ -133,7 +139,6 @@ COPY dsh-profile/settings.yaml /root/.dsh/settings.yaml
 
 ARG DSH_TUI_BUNDLE=@deepseek-harness-tui/dsh-tui@0.10.1
 RUN dsh plugin --profile dsh-tui add "${DSH_TUI_BUNDLE}" \
- && dsh plugin --profile web add @deepseek-ai/dsh-web-app \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
@@ -186,7 +191,6 @@ RUN test -f /root/.dsh/AGENTS.md \
  && test -d /root/.dsh/rules \
  && test -f /root/.dsh/ontology/registry.json \
  && test -f /root/.agents/skills/plane/SKILL.md \
- && test -d /root/.dsh/profiles/web \
  && test -f /root/.gitconfig \
  && test -x /usr/local/bin/dsh-prime \
  && test -x /usr/local/bin/gh \
