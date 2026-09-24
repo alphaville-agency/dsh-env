@@ -108,10 +108,20 @@ dsh-prime         # fetch or refresh the repositories (first thing, every sessio
 it sleeps, so a clone cannot be baked at build time and would be stale if it were, and running it
 behind the TUI would put a network clone on the path to a prompt.
 
-**The container is ephemeral.** It stops five minutes after the last request and `/workspace` is
-reset on the next wake. Git is the source of truth, and work that is not pushed does not exist -
-commit and push before you stop. `~/.dsh/rules/where-work-happens.md` is the long form, and it is in
-the image.
+**The container is ephemeral, and you do not have to manage that.** Cloudflare documents it plainly -
+"all disk is ephemeral … the next time it is started, it will have a fresh disk as defined by its
+container image" - and this was verified here rather than assumed: a marker file written to
+`/workspace` was gone seven minutes later and the container's boot id had changed. Snapshots
+("coming soon") and FUSE-to-R2 are the only persistence the platform offers; FUSE was measured
+failing three separate ways, and its own docs warn against expecting SSD-like performance.
+
+So the working tree genuinely does not survive. What that does NOT mean is that you are responsible
+for remembering. The platform announces the shutdown - `onActivityExpired()` when the sleep timer
+fires, `onStop()` when the container exits - and `src/sandbox.ts` uses both to copy uncommitted
+changes and untracked files out to R2 before the disk is discarded.
+
+That is a safety net, not a workflow. **Pushing is still how work leaves this environment**: the
+capture is a patch in an object store, and pushed work is work.
 
 ## The contract
 
