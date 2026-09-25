@@ -90,6 +90,12 @@ ENV DSH_HOME=/root/.dsh
 COPY bin/dsh-session /usr/local/bin/dsh-session
 RUN chmod 0755 /usr/local/bin/dsh-session
 
+# The bounded agent helper: one prompt over ACP, one reply on stdout. It is on PATH because
+# POST /agent runs it by name, and a script that is present but not executable fails the same way a
+# missing plugin does — quietly, in a request, instead of at build time. The verifier below covers it.
+COPY bin/agent-ask.mjs /usr/local/bin/agent-ask
+RUN chmod 0755 /usr/local/bin/agent-ask
+
 # pnpm, because that is what the harness uses to manage profiles.
 #
 # `dsh plugin add` shells out to pnpm and fails with 127 without it, and the reason is not
@@ -275,7 +281,7 @@ RUN command -v dsh \
 # This is also the only place a missing tool can be caught. The brief path was the counter-example:
 # python3 was absent, the interpreter failed, `|| true` swallowed it, and the boot banner showed the
 # result six hours later in front of the operator.
-RUN for t in git curl jq tmux rg less make python3 gpg gh node npm dsh; do \
+RUN for t in git curl jq tmux rg less make python3 gpg gh node npm dsh agent-ask; do \
         command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 1; }; \
     done \
  && python3 --version \

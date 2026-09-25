@@ -52,6 +52,28 @@ export const SLEEP_AFTER = "5m";
  */
 export const ROUTE_HEALTHZ = "/healthz";
 export const ROUTE_TERMINAL = "/ws/terminal";
+
+/**
+ * The bounded agent surface: prompt a session over ACP, get its reply back.
+ *
+ * BOUNDED, AND DELIBERATELY NOT `POST /run`. That endpoint executed arbitrary commands as root and
+ * was measured answering 200 to an anonymous curl from the public internet; it came back behind auth
+ * once, and the record says why that was still the wrong shape — an endpoint for the author's
+ * convenience is an arbitrary-command API on a public hostname.
+ *
+ * This one runs exactly one thing: `dsh --profile acp`, the Agent Client Protocol server, with a
+ * prompt the caller supplies and nothing else. There is no command field, no shell, no profile
+ * selection: the profile is a constant, the input is a message, and the output is that message's
+ * reply. It cannot become a shell because there is no path from a request field to argv.
+ *
+ * Cloudflare Access sits in front of the hostname for HTTP and WebSocket alike, so this inherits
+ * that gate rather than adding a second one.
+ */
+export const ROUTE_AGENT = "/agent";
+export const ROUTE_AGENT_PROFILE = "acp";
+// Seconds on the wire for a single model turn; long enough for a real reply, bounded so a hung
+// session cannot pin an open request for ever.
+export const ROUTE_AGENT_TIMEOUT_MS = 120000;
 export const ROUTE_ROOT = "/";
 
 /**

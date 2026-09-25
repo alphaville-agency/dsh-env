@@ -38,10 +38,14 @@ import {
   GH_TOKEN_ENV,
   METHOD_FIELD,
   METHOD_GET,
+  METHOD_POST,
   MODEL_KEY_ENV,
   OK_FIELD,
   ROUTES_FIELD,
   ROUTE_FIELD,
+  ROUTE_AGENT,
+  ROUTE_AGENT_PROFILE,
+  ROUTE_AGENT_TIMEOUT_MS,
   ROUTE_HEALTHZ,
   ROUTE_ROOT,
   ROUTE_TERMINAL,
@@ -185,6 +189,7 @@ function describe(): Response {
       { [ROUTE_FIELD]: ROUTE_ROOT, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "this description" },
       { [ROUTE_FIELD]: ROUTE_HEALTHZ, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "liveness; does not wake the sandbox" },
       { [ROUTE_FIELD]: ROUTE_TERMINAL, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "interactive terminal; needs a WebSocket upgrade" },
+      { [ROUTE_FIELD]: ROUTE_AGENT, [METHOD_FIELD]: METHOD_POST, [DESCRIPTION_FIELD]: "prompt a session over ACP and read its reply; bounded to one fixed profile" },
     ],
   });
 }
@@ -279,6 +284,66 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+
+/**
+ * The agent surface: prompt a session over ACP and return its reply.
+ *
+ * WHY THIS EXISTS. Driving the remote session meant scraping ANSI off a terminal that redraws
+ * constantly, and the tell-tale failure was that my own input came back looking like the model's
+ * answer — several rounds went into telling them apart with nothing to show for it. ACP is the
+ * protocol the harness already ships for out-of-process control (`dsh-acp`), and it answers the
+ * provider-picking question that `dsh-sdk-jsonrpc-server` cannot: that plugin gates the provider
+ * through `hasAdapterFor()` and rejects a pi-ai route, while ACP's provider is an ordinary config
+ * row, so it runs on our gateway like everything else.
+ *
+ * BOUNDED BY CONSTRUCTION. `POST /run` existed once and executed arbitrary commands as root; it
+ * answered 200 to an anonymous curl. This route runs one fixed program — `dsh --profile acp` — with
+ * a prompt in place of any command. There is no command field, no shell and no profile selection,
+ * so there is no path from a request field to argv. The prompt is passed as one argument and read
+ * back from stdout, which the ACP server is documented to reserve for JSON-RPC frames.
+ *
+ * Returns `text` (the assistant's reply), `stopReason`, and `usage`. It fails loudly: a route that
+ * silently returns an empty reply would be indistinguishable from a session that ignored the prompt.
+ */
+async function agent(sandbox: Sandbox, request: Request): Promise<Response> {
+  if (request.method !== METHOD_POST) {
+    return new Response("the agent route takes a prompt: POST {\"prompt\": \"...\"}", { status: 405 });
+  }
+
+  let body: { prompt?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return Response.json({ error: "the body must be JSON" }, { status: 400 });
+  }
+  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  // A bound on size, not on content: this is a message to a model, and an unbounded one would be a
+  // way to spend a session' budget with a single request.
+  if (prompt.length === 0 || prompt.length > 8000) {
+    return Response.json({ error: "prompt must be 1..8000 characters" }, { status: 400 });
+  }
+
+  const started = Date.now();
+  // The prompt travels as an ARGUMENT to a fixed script, never as a command. `agent-ask.mjs` does
+  // the ACP handshake (initialize, session/new, session/prompt), prints ONLY the reply on stdout and
+  // its diagnostics on stderr, so what comes back here is the model's answer and not a log line.
+  const result = await sandbox.exec(
+    `AGENT_PROFILE=${ROUTE_AGENT_PROFILE} node /usr/local/bin/agent-ask ${JSON.stringify(prompt)}`,
+    { timeout: ROUTE_AGENT_TIMEOUT_MS },
+  );
+  const stdout = (result.stdout ?? "").trim();
+  const exitCode = result.exitCode ?? 1;
+  // `agent-ask` exits 0 only on `end_turn` with a non-empty reply, so exit code and text agree: a
+  // truncated or refused turn is reported as one rather than presented as an answer.
+  return Response.json({
+    text: stdout,
+    stopReason: exitCode === 0 ? "end_turn" : "failed",
+    exitCode,
+    stderr: (result.stderr ?? "").slice(-400),
+    elapsedMs: Date.now() - started,
+  });
+}
+
 /** The interactive terminal: back the session store, then hand the upgrade to the SDK. */
 async function terminal(request: Request, env: Env): Promise<Response> {
   if (request.headers.get("Upgrade")?.toLowerCase() !== WEBSOCKET_UPGRADE) {
@@ -318,6 +383,11 @@ export default {
 
     if (request.method === METHOD_GET && url.pathname === ROUTE_HEALTHZ) return health();
     if (request.method === METHOD_GET && url.pathname === ROUTE_ROOT) return describe();
+    if (url.pathname === ROUTE_AGENT) {
+      const sandbox = sandboxFor(env);
+      await injectSecrets(sandbox, env);
+      return await agent(sandbox, request);
+    }
     if (url.pathname === ROUTE_TERMINAL) return await terminal(request, env);
 
     return new Response("not found", { status: 404 });
