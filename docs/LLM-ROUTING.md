@@ -56,13 +56,11 @@ stored key only when that header is absent, and a placeholder would be forwarded
   upstream gateway hop. The two account gateways exist and answer direct calls; nothing routes
   through them.
 
-## Not yet done
+## Deploying the container's copy
 
-The container's copy of this configuration **cannot be deployed from here**: the remote dsh Worker
-(`shared-tooling-dsh-shell`) lives in Cloudflare account `ed5246df839f2f05c5ac88597e0f2177`, and the
-credential available on this machine cannot see that account — `GET /accounts/ed5246…/workers/scripts/shared-tooling-dsh-shell`
-answers `10000 Authentication error`, while the same Worker answers `10007 This Worker does not exist
-on your account` in the account the credential *can* see. So `dsh-profile/settings.yaml`,
-`dsh-profile/cordis.patch.yml`, `src/names.ts` and `.dsh/MODEL-ROLES.md` here are **prepared and
-committed, and waiting for a deploy made with credentials for that account**. Until then the container
-still runs the old `cheapinference-com` route.
+The container reads this configuration from `dsh-profile/settings.yaml`, baked into the image, and the
+model credential from the `CF_AI_GATEWAY_TOKEN` Worker secret. Both land in one deploy: the secret is
+set from the repository's own `CF_AI_GATEWAY_TOKEN` secret by a step in `.github/workflows/deploy.yml`,
+immediately before the deploy that needs it, so the config and the credential cannot drift apart.
+
+That workflow is the only thing that can reach the account, and it does not run from a laptop.

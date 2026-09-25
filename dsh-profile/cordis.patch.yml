@@ -3,7 +3,7 @@
 # overrides, disables, and insert lists; `!!js` expressions allowed).
 
 # Subagent child defaults — spawned/forked workers route to gpt-5.6-luna on
-# cheapinference-com instead of inheriting the parent (agent-default-model)
+# cf-ai-gateway instead of inheriting the parent (agent-default-model)
 # route. dsh-tool-subagent's `agentOptions` config is the child provider/model
 # default (plus the schema-required reasoningEffort and maxTokens); the active
 # tool-subagent rows live in the standard agent preset, so these entries restate

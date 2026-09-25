@@ -21,7 +21,8 @@ cloned: agency  tooling  reference-implementation
 ```
 
 Credentials reach the container as Worker secrets and never touch this repository or the image: the
-model key (`CHEAPINFERENCE_COM_API_KEY`) and gh's (`GH_TOKEN`).
+inference-router token (`CF_AI_GATEWAY_TOKEN`, which is NOT a provider key — the provider keys live in
+the AI Gateways) and gh's (`GH_TOKEN`).
 
 **Priming is the whole configuration the agent inherits.** Before this, the rules, the router, the
 model roles and the naming registry sat in this repository wired to nothing - so a session opened
@@ -34,7 +35,7 @@ the router points at exists, so a dangling reference fails the build rather than
 The environment boots the harness, reaches a model, and holds a conversation. This was verified by
 connecting the same way `dsh.sh` does - authenticated WebSocket, `shell=dsh-session` - sending
 `Reply with exactly: CUTOVER-OK`, and receiving `CUTOVER-OK` back from `deepseek-v4.1-flash` through
-the cheapinference gateway, with the TUI's own token meter reporting `ctx 0.8% (8.3k/1.0m)`.
+the inference router, with the TUI's own token meter reporting `ctx 0.8% (8.3k/1.0m)`.
 
 | Route | What it does |
 |---|---|
@@ -48,8 +49,8 @@ an endpoint that exists for the author's convenience is an arbitrary-command API
 hostname, and the interface it stood in for already exists. Verification happens inside the session.
 
 The container carries the launcher, a `dsh-tui` profile built by the harness's own `dsh plugin add`,
-and the `settings.yaml` that points the harness at cheapinference. The model credential is a Worker
-secret, injected with `setEnvVars`; nothing about it is in this repository or in the image.
+and the `settings.yaml` that points the harness at `aig.drksci.com/dsh/v1`. The model credential is a
+Worker secret, injected with `setEnvVars`; nothing about it is in this repository or in the image.
 
 ## The floor is proven, with output
 
