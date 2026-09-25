@@ -222,27 +222,39 @@ echo
 # It fails soft, the way dsh-prime handles a missing clone: no capability repo or unreadable
 # goals leave BRIEF empty and both paths still start, with a line saying why.
 BRIEF=""
+# BUILT IN SHELL, NOT PYTHON. python3 is deliberately absent from this image - it is listed among
+# the tools parked in container.Dockerfile ("each comes back with the layer that can be verified to
+# use it"), so the python heredoc that built this brief failed, `|| true` swallowed the failure, and
+# BRIEF was silently empty in the container while looking correct on the laptop where python3 exists.
+# The goal files are plain text; shell can read them.
 if [ -f /workspace/agency/docs/GOALS.md ]; then
-    BRIEF=$(python3 - <<'PY' 2>/dev/null || true
-import pathlib
-docs = pathlib.Path("/workspace/agency/docs")
-parts = []
-for name in ("GOALS.md", "HANDOVER.md"):
-    f = docs / name
-    if f.exists():
-        parts.append(f"=== {name} ===\n" + f.read_text().strip())
-body = "\n\n".join(parts)
-print(
-    "You are working autonomously on the agency in /workspace. Below are the standing goal and the\n"
-    "handover - the standard the work is judged by, not a specification for it.\n\n"
-    + body
-    + "\n\nStart at build order step 1 (Console and authoritative ledger). Choose the ordering "
-      "yourself, keep going across turns, and report what you decided rather than asking. If you are "
-      "blocked on a credential, an account or an endpoint, name it and continue on the unblocked work "
-      "- AGENTS.md says where to request what you cannot mint."
+    GOALS_BODY=$(cat /workspace/agency/docs/GOALS.md 2>/dev/null || true)
+    HANDOVER_BODY=""
+    if [ -f /workspace/agency/docs/HANDOVER.md ]; then
+        HANDOVER_BODY=$(cat /workspace/agency/docs/HANDOVER.md 2>/dev/null || true)
+    fi
+    BRIEF=$(cat <<BRIEF_EOF
+You are working autonomously on the agency in /workspace. Below are the standing goal and the
+handover - the standard the work is judged by, not a specification for it.
+
+=== GOALS.md ===
+$GOALS_BODY
+
+=== HANDOVER.md ===
+$HANDOVER_BODY
+
+Start at build order step 1 (Console and authoritative ledger). Choose the ordering yourself,
+keep going across turns, and report what you decided rather than asking. If you are blocked on
+a credential, an account or an endpoint, name it and continue on the unblocked work - AGENTS.md
+says where to request what you cannot mint.
+BRIEF_EOF
 )
-PY
-)
+    # A brief that came back empty or absurdly short is not a brief: the heredoc above would have
+    # expanded to the header with empty bodies if the reads failed, so check the size.
+    if [ ${#BRIEF} -lt 500 ]; then
+        echo "[brief too short (${#BRIEF} chars): the goals did not read correctly]"
+        BRIEF=""
+    fi
 fi
 if [ -n "$BRIEF" ]; then
     echo "[brief from /workspace/agency/docs: GOALS.md + HANDOVER.md is ready for this session]"
