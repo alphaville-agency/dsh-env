@@ -43,6 +43,20 @@ PROFILE="${DSH_PROFILE:-dsh-tui}"
 DSH_HOME_DIR="${DSH_HOME:-/root/.dsh}"
 STORE="$DSH_HOME_DIR/sessions"
 STATUS_FILE=/tmp/dsh-persistence
+HARNESS_ERR=/tmp/dsh-harness.err
+
+show_harness_stderr() {
+    [ -s "$HARNESS_ERR" ] || return 0
+    echo "[what the harness wrote to stderr]"
+    sed 's/^/  /' "$HARNESS_ERR" 2>/dev/null || true
+}
+
+# Run the harness and record what it exited with, without `set -e` ending the script at the failure -
+# there is a report to print afterwards, and it is about that failure.
+run_harness() {
+    STATUS=0
+    dsh --profile "$PROFILE" "$@" 2>"$HARNESS_ERR" || STATUS=$?
+}
 
 if ! command -v dsh >/dev/null 2>&1; then
     echo "dsh is not on PATH. The harness launcher is missing from this image." >&2
@@ -59,6 +73,17 @@ fi
 # honest witness that the platform stopped this container and started another - the whole question a
 # persistence test asks, and a value the operator cannot otherwise see from inside a session.
 echo "[boot $(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown) at $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
+
+# What this session will run. Printed because a TUI that opens onto nothing is otherwise
+# indistinguishable from a TUI that never started, and the versions are the first thing to look at
+# when it does: the profile is installed at image build time by `dsh plugin add`, so a rebuild can
+# change it.
+TUIPKG="$DSH_HOME_DIR/profiles/$PROFILE/node_modules/@deepseek-harness-tui/dsh-tui/package.json"
+if [ -f "$TUIPKG" ]; then
+    echo "[harness $(dsh --version 2>/dev/null | head -1) · dsh-tui $(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$TUIPKG" | head -1)]"
+else
+    echo "[harness $(dsh --version 2>/dev/null | head -1) · the dsh-tui package is not in the profile]"
+fi
 
 # The log the Worker's persistence hooks left: what the capture before this boot did, and what the
 # restore that just ran did. Printed because there is nowhere else to see it - the container's disk
@@ -145,16 +170,33 @@ if [ -n "$RESUME_ID" ]; then
     echo "[attaching to #$RESUME_ID, the most recent conversation in this container]"
     # `if`, not `&&`: with `set -e` a failing command in a condition is a result, not the end of the
     # script. A clean exit from the TUI is the operator finishing, and that is not a retry either.
-    if dsh --profile "$PROFILE" --resume "$RESUME_ID" "$@"; then
-        exit 0
+    if dsh --profile "$PROFILE" --resume "$RESUME_ID" "$@" 2>"$HARNESS_ERR"; then
+        STATUS=0
+    else
+        STATUS=$?
+        echo
+        echo "[the harness exited without staying in #$RESUME_ID, so the session above is why. Rather]"
+        echo "[than leave you with no session at all, here is a fresh one. #$RESUME_ID is untouched and]"
+        echo "[can still be picked from /resume inside it.]"
+        show_harness_stderr
+        echo
+        run_harness "$@"
     fi
-    echo
-    echo "[the harness exited without staying in #$RESUME_ID, so the session above is why. Rather]"
-    echo "[than leave you with no session at all, here is a fresh one. #$RESUME_ID is untouched and]"
-    echo "[can still be picked from /resume inside it.]"
-    echo
 else
     echo "[no stored conversation to attach to: starting a new one]"
+    run_harness "$@"
 fi
 
-exec dsh --profile "$PROFILE" "$@"
+# The harness's exit status and its stderr, printed rather than discarded. A TUI that exits without
+# drawing anything is a blank terminal and no explanation; this is the explanation, and it is the
+# only place it exists. The cost of redirecting stderr to a file is that it is not live during the
+# session, which for a TUI whose render target is stdout is a price worth paying once.
+echo
+echo "[the harness exited with status $STATUS]"
+show_harness_stderr
+
+# What the session left behind, which is the question the next boot asks of this boot. It is printed
+# here because this is the last moment the container still holds the answer.
+LEFT=$(session_logs | grep -c . || true)
+echo "[conversations in $STORE after this session: ${LEFT:-0}]"
+exit "$STATUS"

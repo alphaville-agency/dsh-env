@@ -88,8 +88,12 @@ function run(home, extraEnv = {}) {
       ...extraEnv,
     },
   });
-  const calls = readFileSync(log, "utf8").split("\n").filter((line) => line !== "");
-  return { ...result, calls };
+  // The launcher asks the harness for its version as part of the session header, so the stub sees
+  // one call that is not a session. Only the profile invocations answer "which conversation did it
+  // start".
+  const recorded = readFileSync(log, "utf8").split("\n").filter((line) => line !== "");
+  const calls = recorded.filter((line) => line.includes("--profile"));
+  return { ...result, calls, versions: recorded.length - calls.length };
 }
 
 /** A home with a stub harness and the profile directory the launcher checks for. */
@@ -208,4 +212,23 @@ test("prints the Worker's persistence log, which is the only place it can be see
 
 test("the launcher exists and is executable in the image", () => {
   assert.ok(existsSync(LAUNCHER), "bin/dsh-session must exist: the image copies it");
+});
+
+test("the session header reports the boot id, so a restart is visible from inside", () => {
+  const home = makeHome();
+  const { stdout } = run(home);
+
+  assert.match(stdout, /\[boot \S+ at \d{4}-\d{2}-\d{2}T/);
+});
+
+test("a session that ended is reported, with what it left in the store", () => {
+  const home = makeHome();
+  makeStore(home, [{ id: NEWER, mtime: "2026-09-25T02:19:15Z" }]);
+
+  const { stdout, status } = run(home);
+
+  assert.equal(status, 0);
+  assert.match(stdout, /\[the harness exited with status 0\]/);
+  // The next boot's question about this boot, answered while the container can still answer it.
+  assert.match(stdout, /after this session: 1\]/);
 });

@@ -246,6 +246,14 @@ export interface SavedSessions {
   sessions: number;
   /** Size of the tar, in KiB, as measured inside the container. */
   kib: number;
+  /**
+   * What the store itself looked like: `absent`, `empty`, or `present`.
+   *
+   * The distinction is the whole diagnosis when nothing was captured. "The harness has not written a
+   * conversation yet", "the store is there and empty" and "the capture is looking in the wrong
+   * place" all look like `sessions: 0`, and only the first is benign.
+   */
+  store: string;
   /** What could not be read, with the reason. */
   failures: string[];
 }
@@ -304,34 +312,57 @@ export async function recordPersistence(
 /**
  * The container-side half of a capture: choose what to keep, then tar it and base64 it to stdout.
  *
- * One statement per line and joined with `;` rather than a multi-line script, because this string
- * goes through `exec` and it is not worth finding out the hard way whether a newline survives the
- * trip.
+ * WHY IT IS ONE LINE OF `; `-SEPARATED STATEMENTS, AND WHY THAT IS EXACTLY WHAT BROKE IT. The command
+ * travels to the container as a single string, so it is written as array elements joined with `; ` -
+ * one element per statement. THE JOIN IS NOT FREE: an element that ends in `do` or `then` is followed
+ * by a `;`, and `; ` cannot separate those from what follows. `for x in y; do; z; done` is a SYNTAX
+ * ERROR, and `if p; then; s; fi` is one too. Measured:
  *
- * The count of what it selected and the size in KiB go to STDERR, which `exec` returns separately,
- * so the payload on stdout stays exactly the base64 text with no framing of ours in it. An empty
- * store exits 0 with an empty stdout: nothing to save is not an error.
+ *     $ sh -c 'for i in a b; do; echo $i; done'
+ *     sh: -c: line 0: syntax error near unexpected token `;'
+ *     [exit 2]
+ *
+ * AND A SYNTAX ERROR IN A PERSISTENT SHELL DOES NOT FAIL A COMMAND - IT ENDS THE SHELL. `exec` runs in
+ * the container's session shell, not a fresh process, so the capture killed the session it ran in, and
+ * the persistence log recorded it for the first time as:
+ *
+ *     capture  FAILED: could not read the session store: Session 'sandbox-dsh' shell exited (exit code: 2)
+ *
+ * That is the whole reason no conversation has ever been saved: the capture was the first thing to
+ * run this script, and it could not be parsed. So a loop or a conditional must be ONE element, and
+ * nothing may end in `do`, `then`, `{` or a backslash.
+ *
+ * There is no `exit` either, for the same reason the syntax matters: `exit` does not end the script,
+ * it ends the SESSION (the SDK says so in its own error text). The script used to `exit 0` on the
+ * ordinary "store is empty" path. `set -u` is gone too - an unbound variable would take the shell
+ * down - and it does not `cd`, because the working directory is session state as well.
+ *
+ * AND THE NAME OF WHAT IT ARCHIVES STARTS WITH TWO DASHES. The harness names each project directory
+ * after its working directory: `--workspace--`. Passed to `tar` as an operand, GNU and BSD both read
+ * that as an option and refuse it ("Option --workspace-- is not supported"). `-C` plus `--` ends the
+ * option list; the restore's `mv` carries the same `--`.
+ *
+ * The count of what it selected, the size in KiB and what the store looked like go to STDERR, which
+ * `exec` returns separately, so the payload on stdout stays exactly the base64 text with no framing
+ * of ours in it. An empty store writes nothing to stdout and is not an error.
  */
 const SESSION_CAPTURE_SCRIPT = [
-  "set -u",
   `store=${SESSION_STORE_DIR}`,
-  `[ -d "$store" ] || { echo "0 0" >&2; exit 0; }`,
-  `cd "$store" 2>/dev/null || { echo "0 0" >&2; exit 0; }`,
-  'list=""; count=0; kib=0',
-  // Newest first: `ls -1t` orders by the directory's mtime, which moves when its session is written.
-  `for name in $(ls -1t 2>/dev/null); do`,
-  `  [ -d "$name" ] || continue`,
-  `  [ "$count" -lt ${SESSION_SNAPSHOT_MAX_SESSIONS} ] || break`,
-  `  size=$(du -sk "$name" 2>/dev/null | cut -f1)`,
-  `  size=\${size:-0}`,
-  // The budget is consulted only from the second session on, so the newest one is never the one
-  // dropped for being large.
-  `  if [ "$count" -gt 0 ] && [ $((kib + size)) -gt ${SESSION_SNAPSHOT_MAX_KIB} ]; then break; fi`,
-  `  kib=$((kib + size)); count=$((count + 1)); list="$list $name"`,
-  "done",
-  `echo "$count $kib" >&2`,
-  `[ "$count" -gt 0 ] || exit 0`,
-  "tar -cf - $list | base64 -w0",
+  'list=""; count=0; kib=0; state=absent',
+  `[ -d "$store" ] && state=empty`,
+  // One element: the loop, with its body, in a single statement - see the header. Newest first,
+  // because `ls -1t` orders by the directory's mtime, which moves when its session is written.
+  `for name in $(ls -1t "$store" 2>/dev/null); do ` +
+    `[ -d "$store/$name" ] || continue; ` +
+    `[ "$count" -lt ${SESSION_SNAPSHOT_MAX_SESSIONS} ] || break; ` +
+    `size=$(du -sk "$store/$name" 2>/dev/null | cut -f1); size=\${size:-0}; ` +
+    // The budget is consulted only from the second session on, so the newest one is never the one
+    // dropped for being large.
+    `if [ "$count" -gt 0 ] && [ $((kib + size)) -gt ${SESSION_SNAPSHOT_MAX_KIB} ]; then break; fi; ` +
+    `kib=$((kib + size)); count=$((count + 1)); list="$list $name"; done`,
+  `if [ "$count" -gt 0 ]; then state=present; fi`,
+  `echo "$count $kib $state" >&2`,
+  `if [ "$count" -gt 0 ]; then tar -cf - -C "$store" -- $list | base64 -w0; fi`,
 ].join("; ");
 
 /**
@@ -339,13 +370,19 @@ const SESSION_CAPTURE_SCRIPT = [
  *
  * Nothing reaches the store until the whole archive has decoded - `&&` stops the chain at the first
  * failure - so a half-transfer cannot masquerade as "this container already has sessions".
+ *
+ * `mv -n -- {}` rather than `mv -n {}`, and the `--` is load-bearing: what is being moved out of the
+ * staging directory is a project directory called `--workspace--`, and both GNU and BSD `mv` read a
+ * leading-dash operand as an option ("illegal option -- -", exit 64). The `&&` chain would then stop
+ * there, having decoded the archive and moved nothing, and the restore would report a failure it
+ * could not name.
  */
 const SESSION_RESTORE_SCRIPT = [
   `rm -rf ${SESSION_RESTORE_STAGE_DIR}`,
   `mkdir -p ${SESSION_RESTORE_STAGE_DIR}`,
   `base64 -d ${SESSION_SNAPSHOT_FILE} | tar -xf - -C ${SESSION_RESTORE_STAGE_DIR}`,
   `mkdir -p ${SESSION_STORE_DIR}`,
-  `find ${SESSION_RESTORE_STAGE_DIR} -mindepth 1 -maxdepth 1 -exec mv -n {} ${SESSION_STORE_DIR}/ \\;`,
+  `find ${SESSION_RESTORE_STAGE_DIR} -mindepth 1 -maxdepth 1 -exec mv -n -- {} ${SESSION_STORE_DIR}/ \\;`,
   `rm -rf ${SESSION_RESTORE_STAGE_DIR} ${SESSION_SNAPSHOT_FILE}`,
 ].join(" && ");
 
@@ -381,12 +418,13 @@ export async function captureSessions(
 /**
  * What the capture did, in one line, for the log the NEXT boot reads back.
  *
- * The three outcomes are the three failures that look identical from the outside, which is the whole
- * reason this is written down: nothing to save, a save that failed, and a save that worked.
+ * Three failures look identical from the outside - nothing to save, a save that failed, and a save
+ * that worked - so the line names which one happened, and the "nothing" case says what the store
+ * actually looked like rather than merely that it held nothing.
  */
 function describeCapture(result: SavedSessions): string {
   if (result.failures.length > 0) return `FAILED: ${result.failures.join("; ")}`;
-  if (result.outcome !== "wrote") return "nothing to save: the store holds no conversation directories";
+  if (result.outcome !== "wrote") return `nothing to save: the store is ${result.store}`;
   return `saved ${result.sessions} store entr${result.sessions === 1 ? "y" : "ies"}, ` +
     `${result.kib} KiB to ${result.key}`;
 }
@@ -396,7 +434,14 @@ async function captureSessionsInternal(
   bucket: R2Bucket,
   stamp: string,
 ): Promise<SavedSessions> {
-  const result: SavedSessions = { outcome: "nothing", key: "", sessions: 0, kib: 0, failures: [] };
+  const result: SavedSessions = {
+    outcome: "nothing",
+    key: "",
+    sessions: 0,
+    kib: 0,
+    store: "unknown",
+    failures: [],
+  };
 
   let output: { stdout: string; stderr: string; exitCode: number };
   try {
@@ -408,9 +453,10 @@ async function captureSessionsInternal(
     return result;
   }
 
-  const counted = /(\d+)\s+(\d+)/.exec(output.stderr);
+  const counted = /(\d+)\s+(\d+)\s+(\S+)/.exec(output.stderr);
   result.sessions = counted ? Number(counted[1]) : 0;
   result.kib = counted ? Number(counted[2]) : 0;
+  result.store = counted ? counted[3] : `unreadable (${output.stderr.trim() || "no output"})`;
 
   if (result.sessions === 0) {
     // Not a failure and not a write: see "refuses to write an empty snapshot" above.
@@ -487,7 +533,16 @@ async function restoreSessionsInternal(
   sandbox: Container,
   bucket: R2Bucket,
 ): Promise<SavedSessions> {
-  const result: SavedSessions = { outcome: "nothing", key: SESSION_SNAPSHOT_KEY, sessions: 0, kib: 0, failures: [] };
+  const result: SavedSessions = {
+    outcome: "nothing",
+    key: SESSION_SNAPSHOT_KEY,
+    sessions: 0,
+    kib: 0,
+    // A restore is not a capture: the store's own shape is the capture's question, and this records
+    // only whether the snapshot was there.
+    store: "unknown",
+    failures: [],
+  };
 
   let snapshot: R2ObjectBody | null;
   try {
