@@ -77,3 +77,23 @@ own restraint, and by its agents' own judgement about what a task is worth:
   `alphaville-inference-gateway` → Settings → Spend limits → add a rule for $15 over a monthly
   window. Until it exists, the only spend bound on the agency is its rate limit and its own agents'
   discipline.
+
+## Accounts, secrets and tokens: request them, never mint them
+
+Anything that widens what an agent can reach — a new API key, a credential, an account, a secret, a
+gateway, a deployment target, a provider route — is **requested from the operator, never created by
+the agent**.
+
+**Request these from `dev@alphaville.space`** (with `admin@alphaville.space` for account-level and
+billing matters). State the change, the resource it belongs to, and who consumes it.
+
+Concretely, do not:
+
+- create or rotate an API token or provider key, even when one looks missing or expired — a
+  credential an agent minted is one it can silently spend against;
+- fund a wallet or enable paid billing — that is the spending rule's line, above, not an agent's;
+- substitute another account, host, model or path to keep going when a credential or route is
+  missing: report it, then ask.
+
+A blocked agent that reported is a working system. An agent that worked around a missing credential
+is a security incident waiting to be discovered by a bill.
