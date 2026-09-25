@@ -184,48 +184,83 @@ test("the launcher's default mount path is the Worker's constant, not a second s
   );
 });
 
-test("a mounted path links the store into the backing before the harness reads it", () => {
-  const home = makeHome();
-  const state = join(home, "state");
-  mkdirSync(state, { recursive: true });
+test("the store is a plain directory, never a symlink into the mount", () => {
+    // The property, not the mechanism: the harness commits a session with `link(staged, current)`,
+    // and FUSE has no link(2) - which is the ENOTSUP the operator saw. A store pointed at the mount
+    // therefore CANNOT be written by the harness, so this asserts the thing that makes writing work.
+    const home = makeHome();
+    const state = join(home, "state");
+    mkdirSync(state, { recursive: true });
 
-  const { stdout, status } = run(home, state, { DSH_MOUNT_STUB: "0" });
+    const { stdout, status } = run(home, state, { DSH_MOUNT_STUB: "0" });
 
-  assert.equal(status, 0);
-  const store = join(home, "sessions");
-  assert.ok(lstatSync(store).isSymbolicLink(), "the store must be a symlink, not a real directory");
-  assert.equal(readlinkSync(store), join(state, "sessions"));
-  assert.match(stdout, /session store backed by R2/);
+    assert.equal(status, 0);
+    const store = join(home, "sessions");
+    assert.ok(existsSync(store), "the store must exist");
+    assert.ok(
+        !lstatSync(store).isSymbolicLink(),
+        "the store must be a real directory: link(2) is unsupported on the mount",
+    );
+    assert.match(stdout, /session store: local directory/);
+    // And it says WHY, so the next person does not "fix" it back into a symlink.
+    assert.match(stdout, /hard link/);
 });
 
-test("a conversation already in the local store is moved into the backing, not discarded", () => {
-  const home = makeHome();
-  const state = join(home, "state");
-  mkdirSync(state, { recursive: true });
-  // The upgrade path: a container that already held conversations before the mount existed.
-  writeConversation(join(home, "sessions"), "2026-09-25T02:19:15Z");
+test("conversations already in the store survive an upgrade from a symlinked store", () => {
+    // The upgrade path: an earlier build linked the store into R2. Replacing a symlink with a real
+    // directory must not cost the operator the conversation it held - but note the bytes stay where
+    // they are, because moving them is exactly what cannot be done through the old path either.
+    const home = makeHome();
+    const state = join(home, "state");
+    mkdirSync(state, { recursive: true });
+    const store = join(home, "sessions");
+    mkdirSync(store, { recursive: true });
+    writeConversation(store, "2026-09-25T02:19:15Z");
 
-  const { status } = run(home, state, { DSH_MOUNT_STUB: "0" });
+    const { status } = run(home, state, { DSH_MOUNT_STUB: "0" });
 
-  assert.equal(status, 0);
-  assert.ok(
-    existsSync(join(state, "sessions", PROJECT, SESSION, "session.v3.jsonl.zstd")),
-    "the pre-existing conversation must be under the mount, not left on the ephemeral disk",
-  );
+    assert.equal(status, 0);
+    assert.ok(!lstatSync(store).isSymbolicLink(), "the symlink must be replaced, not left behind");
+    assert.ok(
+        existsSync(join(store, PROJECT, SESSION, "session.v3.jsonl.zstd")),
+        "the conversation must still be in the real directory the harness can write",
+    );
 });
 
-test("a conversation in the backing is attached to, through the symlink", () => {
-  const home = makeHome();
-  const state = join(home, "state");
-  mkdirSync(state, { recursive: true });
-  writeConversation(join(state, "sessions"), "2026-09-25T02:19:15Z");
+test("a conversation in the backing is restored into the store before it is listed", async () => {
+    // Cross-sleep persistence, and the whole reason a copy exists: the harness cannot commit onto
+    // the mount, so sessions are copied to it on exit and read back on boot. This is the read-back,
+    // and it has to happen BEFORE the launcher counts conversations or it would attach to nothing.
+    const home = makeHome();
+    const state = join(home, "state");
+    mkdirSync(state, { recursive: true });
+    writeConversation(join(state, "sessions"), "2026-09-25T02:19:15Z");
 
-  const { calls, stdout, status } = run(home, state, { DSH_MOUNT_STUB: "0" });
+    const { calls, stdout, status } = run(home, state, { DSH_MOUNT_STUB: "0" });
 
-  assert.equal(status, 0);
-  assert.equal(calls.length, 1);
-  assert.match(calls[0], new RegExp(`--resume ${SESSION}$`));
-  assert.match(stdout, new RegExp(`attaching to #${SESSION}\\b`));
+    assert.equal(status, 0);
+    assert.match(stdout, /restored conversations from R2/);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], new RegExp(`--resume ${SESSION}$`), "the restored conversation must be attached");
+    assert.match(stdout, new RegExp(`attaching to #${SESSION}\\b`));
+});
+
+test("the session is copied back out to the backing when it ends", async () => {
+    // The other half. Without it a restored session would be lost again at the next sleep, and
+    // cross-sleep persistence is the property being asked for. The harness stub writes nothing, so
+    // the store is left as it was and the copy must still run and say so.
+    const home = makeHome();
+    const state = join(home, "state");
+    mkdirSync(state, { recursive: true });
+
+    const { stdout, status } = run(home, state, { DSH_MOUNT_STUB: "0" });
+
+    assert.equal(status, 0);
+    assert.match(stdout, /session copied to R2/);
+    assert.ok(
+        existsSync(join(state, "sessions")) || /reported a problem/.test(stdout),
+        "the copy must reach the backing or say why it did not",
+    );
 });
 
 test("an unmounted path leaves the store local, says so, and still opens the session", () => {
@@ -239,7 +274,9 @@ test("an unmounted path leaves the store local, says so, and still opens the ses
 
   assert.equal(status, 0, "a failed mount must not cost the operator the session");
   assert.ok(!existsSync(join(home, "sessions")) || !lstatSync(join(home, "sessions")).isSymbolicLink());
-  assert.match(stdout, /NOT backed by R2/);
+    assert.match(stdout, /session store: local directory/);
+    assert.doesNotMatch(stdout, /restored conversations from R2/);
+    assert.doesNotMatch(stdout, /session copied to R2/);
   assert.equal(calls.length, 1, "the harness still runs");
 });
 

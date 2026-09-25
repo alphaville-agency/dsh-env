@@ -90,28 +90,31 @@ else
     echo "[harness $(dsh --version 2>/dev/null | head -1) · the dsh-tui package is not in the profile]"
 fi
 
-# The store that has to outlive the container is backed by R2, mounted by the Worker at
-# $DSH_STATE_MOUNT (src/worker.ts, `ensureStateMounted`) before this PTY opens. THE SYMLINK IS MADE
-# HERE, and here rather than in the image because this is the last moment before the harness reads
-# the store: `dsh` creates the store directory if it is missing, and one created as a real directory
-# is on the ephemeral disk.
+# THE SESSION STORE IS A PLAIN DIRECTORY ON CONTAINER DISK, AND THAT IS A DELIBERATE CHOICE.
 #
-# A SYMLINK, NOT A MOUNT OVER THE STORE. s3fs refuses a mount point that is not empty, and the store
-# is non-empty the moment a conversation exists - which is what defeated the earlier attempt to mount
-# over it. The bucket is mounted at an unused path and this path is linked into it.
+# It was previously symlinked into an R2 mount so conversations would outlive a sleep. The mount
+# worked; the store did not, and not because of a config error. The harness commits a session by
+# staging to a temp file and then `link()`ing it into place:
 #
-# THE CHECK IS `mountpoint`, RUN IN THE CONTAINER, because that is ground truth. A directory that
-# merely exists is not a backing: the SDK `mkdir -p`s the mount path on the way to a mount that may
-# then fail, and linking the store into an empty local directory would look like success while
-# quietly losing everything at the next sleep.
+#     await internals.fs.link(staged, currentPath)
 #
-# AND IF THE MOUNT IS NOT THERE, THE SESSION STILL OPENS. This is a report, not a gate: a workspace
-# whose store is local is still a workspace, and refusing the terminal because a mount failed would
-# be a worse failure than the one it describes.
-STATE_MOUNT="${DSH_STATE_MOUNT:-/mnt/state}"
-# One place names the subdirectory: the store's own basename. `basename` is in the image's coreutils.
-STATE_STORE="$STATE_MOUNT/$(basename "$STORE")"
-
+# `link(2)` creates a HARD LINK. FUSE filesystems do not support it - which is why the operator saw
+# `ENOTSUP: operation not supported on socket, link .../session.v3.jsonl.zstd.<tok>.tmp ->
+# .../session.v3.jsonl.zstd`. The bytes were written to the backing store; the commit step that
+# makes them the file `/resume` reads cannot run. So sessions were never really persisting, and the
+# error was reported rather than ignored, exactly as the harness intends.
+#
+# WHY NOT KEEP THE SYMLINK. The harness would have to commit with a rename instead of a hard link,
+# which it cannot, or we would have to run a different persistence backend. Neither is ours to
+# change. So the store is a normal directory - and because a conversation must survive a SLEEP, the
+# bytes are COPIED to the R2 mount on the way out of the session (see the exit path at the bottom of
+# this file) and RESTORED from it on the way in. A copy is a plain write, which FUSE handles; only
+# link(2) is unsupported.
+#
+# The R2 mount itself is left alone: `src/worker.ts` still mounts it at $DSH_STATE_MOUNT for
+# anything else that wants durable state. Nothing links the store into it any more, so a mount
+# failure can no longer look like a working store - which is the failure mode this comment exists
+# to stop someone reintroducing.
 is_mount_point() {
     if command -v mountpoint >/dev/null 2>&1; then
         mountpoint -q "$1"
@@ -126,23 +129,33 @@ is_mount_point() {
     fi
 }
 
-if is_mount_point "$STATE_MOUNT"; then
-    mkdir -p "$STATE_STORE" 2>/dev/null || true
-    # A store that is a real directory holds bytes from before the mount was there. Move them into
-    # the backing before replacing the directory with a link, so the upgrade costs nobody a
-    # conversation. `cp -a` then `rm` rather than `mv`: a cross-filesystem `mv` is a copy, and this
-    # one has to be allowed to fail without leaving the store path half-gone.
-    if [ -d "$STORE" ] && [ ! -L "$STORE" ]; then
-        cp -a "$STORE/." "$STATE_STORE/" 2>/dev/null || true
-        rm -rf "$STORE"
+STATE_MOUNT="${DSH_STATE_MOUNT:-/mnt/state}"
+if [ -L "$STORE" ]; then
+    # Upgrading from an earlier build that already linked it. A symlink to an R2-backed path is
+    # exactly the incompatible arrangement above; replace it with the real directory it was meant
+    # to be, and leave the bytes where they are rather than moving them behind a working harness.
+    rm -f "$STORE"
+fi
+mkdir -p "$STORE" 2>/dev/null || true
+echo "[session store: local directory at $STORE (survives TUI restarts, not a sleep)]"
+echo "[the R2 mount at $STATE_MOUNT is not used for sessions: FUSE has no link(2), and the harness]"
+echo "[commits sessions with a hard link, which is why they never persisted behind it.]"
+# RESTORE FROM R2 BEFORE ANYTHING ASKS WHAT EXISTS. The store is on ephemeral disk, so after a sleep
+# it is empty and the session looks like a first boot. The bytes were copied to the mount on the way
+# out of the previous session; this brings them back before `session_logs` reads them, so a reconnect
+# attaches to the conversation that was actually last there.
+#
+# `is_mount_point` is the same ground truth as before: a directory that merely exists is not a
+# backing, and linking/copying from an empty local directory would quietly report success. A failed
+# restore is a report, never a gate - a session whose history did not come back is still a session.
+if is_mount_point "$STATE_MOUNT" && [ -d "$STATE_MOUNT/$(basename "$STORE")" ]; then
+    STATE_STORE="$STATE_MOUNT/$(basename "$STORE")"
+    restored=$(cp -a "$STATE_STORE/." "$STORE/" 2>&1 || true)
+    if [ -n "$restored" ]; then
+        echo "[restore from R2 reported a problem: $restored]"
+    else
+        echo "[restored conversations from R2 into $STORE]"
     fi
-    mkdir -p "$DSH_HOME_DIR" 2>/dev/null || true
-    ln -sfn "$STATE_STORE" "$STORE"
-    echo "[session store backed by R2: $STORE -> $STATE_STORE]"
-else
-    echo "[the session store is NOT backed by R2: $STATE_MOUNT is not a mount point]"
-    echo "[conversations in this container will not survive it, and the Worker's log says why. The]"
-    echo "[session itself is unaffected: the store below is a directory on this container's disk.]"
 fi
 
 # Every conversation the harness has stored, newest first. The store is one directory per project
@@ -327,6 +340,26 @@ show_harness_stderr
 # The follow-up sender on the resume path, if one was started. Left running it would die with the
 # shell anyway, but waiting for it is not owed: the message is either already in the PTY or gone.
 [ -n "${BRIEF_PID:-}" ] && kill "$BRIEF_PID" 2>/dev/null || true
+
+# COPY THE SESSION OUT TO R2 ON THE WAY OUT. The store is a normal directory because the harness
+# commits it with `link(2)`, which the R2 mount does not support; this is how it still survives a
+# sleep. The copy happens HERE, after the harness has exited and written its file, because there is
+# no reliable "the container is stopping" moment this script can hook - the harness's own exit is the
+# one event that is certain to have happened, and it is the one that just produced the bytes.
+#
+# Plain `cp`, never `link` or `mv`: a copy is an ordinary write, and FUSE writes fine. It is allowed
+# to fail without failing the session, because a session that could not reach R2 is still a session -
+# it only means the next boot restores nothing.
+if is_mount_point "$STATE_MOUNT"; then
+    STATE_STORE="$STATE_MOUNT/$(basename "$STORE")"
+    mkdir -p "$STATE_STORE" 2>/dev/null || true
+    out=$(cp -a "$STORE/." "$STATE_STORE/" 2>&1 || true)
+    if [ -n "$out" ]; then
+        echo "[copying the session to R2 reported a problem: $out]"
+    else
+        echo "[session copied to R2: $STORE -> $STATE_STORE]"
+    fi
+fi
 
 # What the session left behind, which is the question the next boot asks of this boot. It is printed
 # here because this is the last moment the container still holds the answer.
