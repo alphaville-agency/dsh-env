@@ -137,6 +137,30 @@ export const AGENT_PROMPT_PATH = "/tmp/dsh-agent-prompt.txt";
  * running a command inside it would type into somebody's screen.
  */
 export const AGENT_SESSION = "agent";
+
+/**
+ * The variable the harness actually gates bash on, and the value this surface needs.
+ *
+ * WHY THE PERMISSION PRESET WAS NOT ENOUGH. The headless profile's own dump shows what decides it:
+ *
+ *   - id: sandbox-policy
+ *     config: { mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write' }
+ *   - id: approval
+ *     config: { policy: !!js (process.env.DSH_PERMISSION_MODE ?? 'workspace-write') ===
+ *                       'danger-full-access' ? 'never' : 'ask' }
+ *
+ * Both read the ENVIRONMENT, not the `permission` preset row - so a patch layer setting
+ * `defaultPreset: danger-full-access` composes correctly and changes nothing. Unset, the mode is
+ * `workspace-write` and the approval policy is `ask`, and an automation surface has no approval
+ * channel: every command that needs more than the sandbox default fails closed, which is the harness
+ * reporting honestly that `bash is unavailable entirely`.
+ *
+ * This is the same shape of defect as the missing DSH_HOME: an `exec` does not inherit the image's
+ * ENV, and the harness reads its policy from the environment. Setting it here is what makes the
+ * surface able to run a command at all.
+ */
+export const DSH_PERMISSION_MODE_ENV = "DSH_PERMISSION_MODE";
+export const DSH_PERMISSION_MODE_VALUE = "danger-full-access";
 /**
  * There is no auth constant here, and that is the point.
  *

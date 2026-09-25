@@ -59,6 +59,8 @@ import {
   STATE_PROBE_TIMEOUT_MS,
   AGENT_PROMPT_PATH,
   AGENT_SESSION,
+  DSH_PERMISSION_MODE_ENV,
+  DSH_PERMISSION_MODE_VALUE,
   DSH_HOME_PATH,
   DSH_HOME_ENV,
   TERMINAL_SHELL,
@@ -390,6 +392,9 @@ function agentEnv(env: Env): Record<string, string> {
   const values: Record<string, string> = {
     HOME: "/root",
     [DSH_HOME_ENV]: DSH_HOME_PATH,
+    // Without this the harness composes `workspace-write` + `ask`, and an automation surface has no
+    // approval channel, so every command beyond the sandbox default fails closed.
+    [DSH_PERMISSION_MODE_ENV]: DSH_PERMISSION_MODE_VALUE,
   };
   const modelKey = env[MODEL_KEY_ENV];
   if (typeof modelKey === "string" && modelKey.length > 0) values[MODEL_KEY_ENV] = modelKey;
