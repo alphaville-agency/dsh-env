@@ -234,8 +234,53 @@ if [ -n "$RESUME_ID" ]; then
         run_harness "$@"
     fi
 else
-    echo "[no stored conversation to attach to: starting a new one]"
-    run_harness "$@"
+    echo "[no stored conversation to attach to: starting a new one, briefed from /workspace/agency/docs]"
+    # THE BRIEF IS THE FIRST MESSAGE, not a banner above the prompt.
+    #
+    # The goals were already cloned into the workspace by dsh-prime and only ever announced by the
+    # banner above - GOALS.md sat on disk while the model started from nothing and re-derived its own.
+    # That defeats the one reason GOALS.md was written down: "a goal that lives only in a session dies
+    # with the session, and the next agent re-derives a different one."
+    #
+    # So the standing goal and the handover become the opening message of the FRESH conversation.
+    # Fresh only: a resumed conversation already carries them, and repeating them at every attach
+    # would turn a brief into a nag.
+    #
+    # It fails soft, the way dsh-prime handles a missing clone: if the capability repo is not in
+    # /workspace, or the text cannot be read, the session still opens and says which. A session that
+    # refuses to start because a brief was unreadable is worse than one unbriefed.
+    if [ -f /workspace/agency/docs/GOALS.md ]; then
+        BRIEF=$(python3 - <<'PY' 2>/dev/null || true
+import pathlib
+docs = pathlib.Path("/workspace/agency/docs")
+parts = []
+for name in ("GOALS.md", "HANDOVER.md"):
+    f = docs / name
+    if f.exists():
+        parts.append(f"=== {name} ===\n" + f.read_text().strip())
+body = "\n\n".join(parts)
+print(
+    "You are working autonomously on the agency in /workspace. Below are the standing goal and the\n"
+    "handover - the standard the work is judged by, not a specification for it.\n\n"
+    + body
+    + "\n\nStart at build order step 1 (Console and authoritative ledger). Choose the ordering "
+      "yourself, keep going across turns, and report what you decided rather than asking. If you are "
+      "blocked on a credential, an account or an endpoint, name it and continue on the unblocked work "
+      "- AGENTS.md says where to request what you cannot mint."
+)
+PY
+)
+        if [ -n "$BRIEF" ]; then
+            echo "  [briefing from GOALS.md + HANDOVER.md: standing goal, build order, contracts]"
+            run_harness "$BRIEF" "$@"
+        else
+            echo "  [the brief could not be read; starting unbriefed rather than not at all]"
+            run_harness "$@"
+        fi
+    else
+        echo "  [the capability repository is not in /workspace, so there is no brief to inject]"
+        run_harness "$@"
+    fi
 fi
 
 # The harness's exit status and its stderr, printed rather than discarded. A TUI that exits without
