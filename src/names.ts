@@ -115,6 +115,63 @@ export const WEBSOCKET_UPGRADE = "websocket";
 export const STATE_BINDING = "STATE";
 
 /**
+ * The harness's conversation store inside the container, and the snapshot of it that outlives a
+ * sleep.
+ *
+ * WHY IT IS HERE. The container's disk is discarded when it stops, so `/root/.dsh/sessions` - where
+ * the harness keeps every conversation, one directory per session - does not survive, and the
+ * resume picker shows `0 sessions` on the next boot. The store is NOT under `/workspace`, which is
+ * why the SDK's own `createBackup` cannot address it: `DirectoryBackup.dir` must be under
+ * `/workspace`, `/home`, `/tmp`, `/var/tmp` or `/app` (sandbox-BtaWcmmG.d.ts, `interface
+ * DirectoryBackup`), and its production restore path mounts the archive through s3fs + a FUSE
+ * overlay, which this environment measured unusable. So the snapshot is a tar of the store,
+ * carried over `exec` as base64 - the same route src/sandbox.ts already uses for uncommitted work.
+ *
+ * `$DSH_HOME` is `/root/.dsh` in the image (container.Dockerfile), so the store is this path.
+ */
+export const SESSION_STORE_DIR = "/root/.dsh/sessions";
+
+/** Where the session snapshot lives in R2 (`STATE`). One key: the newest snapshot replaces it. */
+export const SESSION_SNAPSHOT_KEY = "dsh-sessions/sessions.tar.b64";
+
+/** What the snapshot holds, readable without decoding it. Rewritten with every capture. */
+export const SESSION_SNAPSHOT_MANIFEST_KEY = "dsh-sessions/MANIFEST.txt";
+
+/** Where the base64 snapshot is staged inside the container before it is decoded. */
+export const SESSION_SNAPSHOT_FILE = "/tmp/dsh-sessions.tar.b64";
+
+/**
+ * Where a restore is unpacked before it is moved into place.
+ *
+ * Extracting straight into the store would leave a half-written store if the transfer failed
+ * midway, and the next boot would read that half-store as "the container already has sessions" and
+ * refuse to restore again. Nothing lands in the store until the whole archive has decoded.
+ */
+export const SESSION_RESTORE_STAGE_DIR = "/root/.dsh/.sessions-restore";
+
+/**
+ * The bound on what a snapshot keeps, because the store grows without limit - one directory per
+ * conversation, forever, and the local one is already 157 MB.
+ *
+ * The newest N session directories by mtime, and the newest at least: the budget is only consulted
+ * from the second session on, so a single oversized session is still captured rather than lost.
+ * `du -sk` measures the directories, so this is a ceiling on the tar, before base64 inflates it by
+ * a third.
+ */
+export const SESSION_SNAPSHOT_MAX_SESSIONS = 20;
+export const SESSION_SNAPSHOT_MAX_KIB = 8 * 1024;
+
+/**
+ * How long a session transfer may take before it is abandoned.
+ *
+ * Both directions run inside a lifecycle hook - `onStart` before the container is usable,
+ * `onActivityExpired` while the platform is waiting to stop it - so a hung transfer must not hold
+ * the lifecycle open. A stopped container with no sessions is recoverable; one that never finishes
+ * starting is not.
+ */
+export const SESSION_TRANSFER_TIMEOUT_MS = 30_000;
+
+/**
  * Request and response field names. Protocol tokens stay inline; anything the JSON contract of
  * *this* Worker defines is named here.
  */
