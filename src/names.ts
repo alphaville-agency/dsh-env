@@ -71,9 +71,15 @@ export const ROUTE_TERMINAL = "/ws/terminal";
  */
 export const ROUTE_AGENT = "/agent";
 export const ROUTE_AGENT_PROFILE = "headless";
-// Seconds on the wire for a single model turn; long enough for a real reply, bounded so a hung
-// session cannot pin an open request for ever.
-export const ROUTE_AGENT_TIMEOUT_MS = 120000;
+// How long one agent turn may run: fifteen minutes.
+//
+// RAISED FROM 120s, WHICH MEASURED NOTHING BUT THE WRONG THING. A one-line reply costs ~16s, but the
+// work this surface exists for - read the goal, edit the repository, commit, push - does not fit in
+// two minutes, and a cap that cuts a turn off mid-edit is worse than no cap: it leaves an agent
+// half-way through a change with no record of where it was. The bound still exists so a wedged turn
+// cannot pin a request for ever, and the streaming route reports progress while it runs, so a long
+// turn is visible rather than silent.
+export const ROUTE_AGENT_TIMEOUT_MS = 900_000;
 export const ROUTE_ROOT = "/";
 
 /**
