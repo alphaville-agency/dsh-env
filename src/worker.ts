@@ -58,6 +58,7 @@ import {
   STATE_MOUNT_TIMEOUT_MS,
   STATE_PROBE_TIMEOUT_MS,
   AGENT_PROMPT_PATH,
+  AGENT_SESSION,
   DSH_HOME_PATH,
   DSH_HOME_ENV,
   TERMINAL_SHELL,
@@ -402,7 +403,8 @@ async function agent(sandbox: Sandbox, request: Request, env: Env): Promise<Resp
   // backticks executed in the container - on a route that exists precisely so no request field can
   // reach argv. Writing it to a fixed path and letting the script read it removes the shell from the
   // path entirely: the only thing interpolated here is a constant.
-  const result = await sandbox.exec(
+  const session = await sandbox.getSession(AGENT_SESSION);
+  const result = await session.exec(
     `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
       `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
       `node /usr/local/bin/agent-ask`,
@@ -487,7 +489,8 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
     };
 
     try {
-      const result = await sandbox.exec(
+      const agentSession = await sandbox.getSession(AGENT_SESSION);
+      const result = await agentSession.exec(
         `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
           `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
           `AGENT_ASK_STREAM=1 node /usr/local/bin/agent-ask`,

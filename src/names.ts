@@ -112,6 +112,25 @@ export const DSH_HOME_ENV = "DSH_HOME";
  * predictable path is one fewer thing to leak or accumulate.
  */
 export const AGENT_PROMPT_PATH = "/tmp/dsh-agent-prompt.txt";
+
+/**
+ * The session the agent route runs its one command in.
+ *
+ * NAMED EXPLICITLY BECAUSE THE IMPLICIT ONE IS WHAT HANGS. Read back from `wrangler tail` against the
+ * live Worker, the split is not "container calls fail" - it is which session they land in:
+ *
+ *   getSession("dsh")      resolved   (this is the line "terminal session ready" is printed after)
+ *   exec, writeFile        canceled   (both land in the SDK's implicit default session)
+ *
+ * `enableDefaultSession` is on, so `sandbox.exec(...)` is supposed to reuse a persistent default
+ * shell - and in this container that call never returns, which is what turned the agent route into a
+ * 150s silence with nothing on either stream. The terminal has always named its session, and the
+ * terminal has always worked. This is the same trick for the same reason.
+ *
+ * A session of its own, not the terminal's: the terminal's session is a live TUI owning a PTY, and
+ * running a command inside it would type into somebody's screen.
+ */
+export const AGENT_SESSION = "agent";
 /**
  * There is no auth constant here, and that is the point.
  *
