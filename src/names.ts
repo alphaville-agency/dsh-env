@@ -158,6 +158,17 @@ export const SESSION_SNAPSHOT_MANIFEST_KEY = "dsh-sessions/MANIFEST.txt";
 export const SESSION_SNAPSHOT_FILE = "/tmp/dsh-sessions.tar.b64";
 
 /**
+ * How much of a payload one `exec` carries when something has to be written into the container.
+ *
+ * The pieces are passed as base64 on the command line and decoded in the container, which keeps the
+ * text out of the shell's quoting rules entirely - these payloads carry other programs' error
+ * messages and, for a snapshot, a whole base64 tar. The bound is the kernel's `ARG_MAX` (2 MB by
+ * default, and that is the total for arguments AND environment), so this is a quarter of it: a
+ * megabyte of sessions is sixteen round trips rather than one command that fails at the limit.
+ */
+export const SESSION_STAGE_CHUNK_CHARS = 64 * 1024;
+
+/**
  * The log of what the persistence hooks actually did - the capture that runs as a container stops,
  * and the restore that runs as the next one starts.
  *

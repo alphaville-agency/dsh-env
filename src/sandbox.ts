@@ -36,6 +36,7 @@ import {
   SESSION_STATUS_FILE,
   SESSION_STATUS_KEY,
   SESSION_STATUS_LINES,
+  SESSION_STAGE_CHUNK_CHARS,
   SESSION_RESTORE_STAGE_DIR,
   SESSION_SNAPSHOT_FILE,
   SESSION_SNAPSHOT_KEY,
@@ -172,6 +173,70 @@ function describe(error: unknown): string {
  */
 export type SessionTransferOutcome = "wrote" | "restored" | "kept" | "nothing";
 
+/**
+ * Put text into a container file, in bounded pieces, and say what happened.
+ *
+ * WHY NOT THE SDK's `writeFile`. It resolves the default execution SESSION first - `writeFile` ->
+ * `resolveExecution` -> `ensureDefaultSession` -> `createSession` through the container's HTTP API -
+ * and this runs inside `onStart`, inside `blockConcurrencyWhile`, before any session exists. The
+ * measured result of ignoring that: a perfectly good line in R2 and no file in the container, with
+ * the exception swallowed into a `console.log` nobody can read. `exec` needs no session, and it
+ * returns an exit code, so a failure here is a fact that goes in the log rather than an exception
+ * somebody has to notice.
+ *
+ * The payload is base64 on the command line and decoded in the container, so no quoting rule of the
+ * shell can be broken by the text being carried. Returns an empty string on success and a sentence
+ * naming the failure otherwise - never throws, because its callers are a boot hook and a shutdown
+ * hook and both must finish.
+ */
+export async function stageFile(
+  sandbox: Container,
+  path: string,
+  content: string,
+): Promise<string> {
+  const encoded = base64(content);
+  const pieces: string[] = [];
+  for (let i = 0; i < encoded.length; i += SESSION_STAGE_CHUNK_CHARS) {
+    pieces.push(encoded.slice(i, i + SESSION_STAGE_CHUNK_CHARS));
+  }
+  if (pieces.length === 0) pieces.push("");
+
+  for (const [index, piece] of pieces.entries()) {
+    // `>` truncates on the first piece, `>>` appends on the rest; the file is not touched until the
+    // first piece lands, so a payload that dies at piece 7 leaves a truncated file rather than a
+    // half-written one pretending to be whole.
+    const redirect = index === 0 ? ">" : ">>";
+    try {
+      const result = await sandbox.exec(
+        `printf '%s' '${piece}' | base64 -d ${redirect} ${path}`,
+        { signal: AbortSignal.timeout(SESSION_TRANSFER_TIMEOUT_MS) },
+      );
+      if (result.exitCode !== 0) {
+        return `piece ${index + 1}/${pieces.length} of ${path} failed: exit ${result.exitCode}: ${
+          result.stderr.trim() || "no output"
+        }`;
+      }
+    } catch (error) {
+      return `piece ${index + 1}/${pieces.length} of ${path} failed: ${describe(error)}`;
+    }
+  }
+
+  return "";
+}
+
+/**
+ * Base64 without the platform's encoding ceremony.
+ *
+ * `btoa` is Latin-1 only and a session's log can carry any text; `TextEncoder` first is what makes
+ * the bytes unambiguous.
+ */
+function base64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 export interface SavedSessions {
   /** What the transfer did. */
   outcome: SessionTransferOutcome;
@@ -221,18 +286,18 @@ export async function recordPersistence(
 ): Promise<void> {
   const line = `${new Date().toISOString()}  ${kind}  ${detail}`;
   const history = [...(await readStatusLog(bucket)), line].slice(-SESSION_STATUS_LINES);
-  const body = `${history.join("\n")}\n`;
+
+  const staged = await stageFile(sandbox, SESSION_STATUS_FILE, `${history.join("\n")}\n`);
+
+  // The durable copy carries the outcome of staging it, because the local copy cannot report that it
+  // is missing - which is the whole reason the first attempt at this was inconclusive.
+  const durable =
+    staged === "" ? history : [...history.slice(0, -1), `${line}  |  ${staged}`];
 
   try {
-    await bucket.put(SESSION_STATUS_KEY, body);
+    await bucket.put(SESSION_STATUS_KEY, `${durable.join("\n")}\n`);
   } catch (error) {
     console.log(`dsh: could not write the persistence log: ${describe(error)}`);
-  }
-
-  try {
-    await sandbox.writeFile(SESSION_STATUS_FILE, body);
-  } catch (error) {
-    console.log(`dsh: could not stage the persistence log for the session: ${describe(error)}`);
   }
 }
 
@@ -449,7 +514,13 @@ async function restoreSessionsInternal(
     }
 
     const payload = await snapshot.text();
-    await sandbox.writeFile(SESSION_SNAPSHOT_FILE, payload);
+    // The same route the log takes, and for the same reason: `writeFile` needs a session, and this
+    // runs before any exists. A failure here is reported rather than thrown, so it reaches the log.
+    const staged = await stageFile(sandbox, SESSION_SNAPSHOT_FILE, payload);
+    if (staged !== "") {
+      result.failures.push(staged);
+      return result;
+    }
 
     const restored = await sandbox.exec(SESSION_RESTORE_SCRIPT, {
       signal: AbortSignal.timeout(SESSION_TRANSFER_TIMEOUT_MS),
@@ -516,6 +587,15 @@ export class Sandbox extends BaseSandbox<Env> {
    * this is the last moment the working tree can be read.
    */
   override async onActivityExpired(): Promise<void> {
+    // Before the save, not after: this line is the difference between "the sleep hook never ran" and
+    // "the sleep hook ran and the save failed", and by the time anybody can look, the container that
+    // would answer is gone.
+    await recordPersistence(
+      this.asContainer(),
+      this.env.STATE,
+      "stop",
+      "the sleep timer expired; saving the conversation before the container is stopped",
+    );
     await this.saveWorkThenStop();
   }
 
@@ -524,6 +604,12 @@ export class Sandbox extends BaseSandbox<Env> {
    * covers a shutdown the sleep timer did not initiate.
    */
   override async onStop(params: StopParams): Promise<void> {
+    await recordPersistence(
+      this.asContainer(),
+      this.env.STATE,
+      "stop",
+      "the container process is exiting; saving the conversation first",
+    );
     await this.saveWork();
     await super.onStop(params);
   }
