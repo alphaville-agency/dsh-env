@@ -165,6 +165,22 @@ export const STATE_MOUNT_PATH = "/mnt/state";
 export const STATE_MOUNT_TIMEOUT_MS = 30_000;
 
 /**
+ * How long `mountpoint -q` may take before the mount is treated as unavailable.
+ *
+ * WHY THIS IS SEPARATE FROM, AND SHORTER THAN, THE MOUNT BUDGET ABOVE. The probe is one command that
+ * either answers in milliseconds or does not answer at all, and it was the ONE `exec` in the Worker
+ * with no `timeout` of its own. Measured with `wrangler tail` against the live Worker: `exec` and
+ * `getSession` both came back `outcome=canceled` at ~29.7s, the last log line was
+ * `dsh: terminal session ready; backing the session store`, and no `session store backing:` line ever
+ * followed - so the request died inside the probe, before `session.terminal()` was ever reached, and
+ * the terminal returned zero frames to a client that waited on it.
+ *
+ * A probe that hangs is a broken container, not a slow one, and the caller already has the right
+ * response: log that the store is unbacked for this session and open the terminal anyway.
+ */
+export const STATE_PROBE_TIMEOUT_MS = 10_000;
+
+/**
  * The harness's conversation store inside the container.
  *
  * WHY IT IS A SYMLINK TARGET RATHER THAN A DIRECTORY. The container's disk is discarded when it

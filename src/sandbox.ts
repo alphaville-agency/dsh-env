@@ -182,12 +182,45 @@ export class Sandbox extends BaseSandbox<Env> {
    */
   override async onStop(params: StopParams): Promise<void> {
     await this.saveWork();
-    await super.onStop(params);
+    await this.stoppingHook(params);
+  }
+
+  /**
+   * `super.onStop`, with the one failure that repeats made survivable.
+   *
+   * WHY THIS WRAPPER EXISTS. `wrangler tail` on the live Worker showed the alarm firing roughly once
+   * a second, every time with:
+   *
+   *   There is no container instance that can be provided to this Durable Object, try again later
+   *
+   * That is a hot loop, and it costs money and blocks the DO: `Container.alarm()` re-arms itself
+   * (`setAlarm(Date.now())`) BEFORE it runs the stopping path, so any exception thrown in that path
+   * leaves the alarm due immediately and it fires again at once. Each iteration re-throws the same
+   * platform message. The container being unavailable is precisely the situation this hook runs in,
+   * so asking the base class to tear down a runtime that the platform will not hand over is expected
+   * to fail - and an expected failure must not be the thing that keeps the DO awake forever.
+   */
+  async stoppingHook(params: StopParams): Promise<void> {
+    try {
+      await super.onStop(params);
+    } catch (error) {
+      console.log(
+        `dsh: the base stop hook could not run (${describe(error)}); ` +
+          `the container is already gone, so there is nothing left to tear down here.`,
+      );
+    }
   }
 
   async saveWorkThenStop(): Promise<void> {
     await this.saveWork();
-    await this.stop();
+    // Same reasoning as `stoppingHook`: the sleep timer fires when nobody is connected, so a
+    // container that has already gone is the ordinary case here rather than an error. A throw from
+    // `stop()` is what turned one expiry into an alarm loop.
+    try {
+      await this.stop();
+    } catch (error) {
+      console.log(`dsh: could not stop the container (${describe(error)}); it is already stopped.`);
+    }
   }
 
   async saveWork(): Promise<void> {

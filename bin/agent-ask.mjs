@@ -21,6 +21,13 @@
 //
 //   node agent-ask.mjs "the prompt"
 //
+// WITH `AGENT_ASK_STREAM=1` STDOUT BECOMES NEWLINE-DELIMITED JSON INSTEAD. The reply is the last
+// thing to exist in the buffered form, which made a streaming consumer wait for the whole turn to
+// see anything at all. In stream mode each frame is one line - `session`, then one `chunk` per
+// assistant text delta as ACP delivers it, then `done` or `error` - so a WebSocket can forward
+// progress while the turn is still running. The two modes never mix: the Worker picks one and parses
+// accordingly, because a stream of NDJSON read as a reply would return framing as an answer.
+//
 // Exits 0 with the reply, non-zero with the reason on stderr. No retry loop: a failed call is a
 // result to report, not something to paper over by asking twice. The one exception is a stale
 // sessionId — resuming a session the server no longer has is not a failure of the prompt, so that
@@ -36,10 +43,23 @@ if (!prompt) {
 // Bounded, because this runs inside an HTTP request that already has a deadline.
 const DEADLINE_MS = Number(process.env.AGENT_ASK_TIMEOUT_MS ?? 110_000);
 const cwd = process.env.AGENT_CWD ?? process.cwd();
+const STREAMING = process.env.AGENT_ASK_STREAM === "1";
 // One file is the whole of the client-side state: the id of the session to resume next time. It
 // lives beside the sessions it names so it is on the same store, and a container whose disk was
 // cleared simply finds nothing there and makes a new session — which is the intended reset.
 const SESSION_FILE = process.env.AGENT_SESSION_FILE ?? `${cwd}/.acp-agent-session`;
+
+/**
+ * One newline-delimited JSON frame on stdout, in stream mode only.
+ *
+ * NAMED `emit`, NOT `frame`, ON PURPOSE. The stdout reader below binds the parsed JSON of each line to
+ * a local `frame`, and a `let frame` in that block shadows an outer `frame` for the whole block — so
+ * calling the helper from inside the reader threw `TypeError: frame is not a function` on the first
+ * assistant chunk, which is to say it failed at the exact moment there was a reply to stream.
+ */
+const emit = (value) => {
+  if (STREAMING) process.stdout.write(JSON.stringify(value) + "\n");
+};
 
 const readSavedSession = () => {
   try { return readFileSync(SESSION_FILE, "utf8").trim() || null; } catch { return null; }
@@ -91,6 +111,7 @@ child.stdout.on("data", (chunk) => {
     if (!update) continue;
     if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text") {
       reply += update.content.text;
+      emit({ type: "chunk", text: update.content.text });
     }
     if (update.sessionUpdate === "usage_update") {
       process.stderr.write(`[usage ${update.used}/${update.size}]\n`);
@@ -106,10 +127,21 @@ child.on("exit", (code) => {
 child.on("error", (e) => { process.stderr.write(`[spawn: ${e.message}]\n`); finish(1); });
 
 let done = false;
+let lastError = null;
 function finish(code) {
   if (done) return;
   done = true;
-  if (code === 0 && reply) process.stdout.write(reply.trim() + "\n");
+  if (STREAMING) {
+    // `done` repeats the whole reply even though `chunk` frames already carried it, so a consumer
+    // that joined late or missed a frame still ends with the complete answer rather than a prefix.
+    emit(
+      code === 0 && reply
+        ? { type: "done", stopReason, text: reply.trim() }
+        : { type: "error", message: lastError ?? `no reply (stopReason ${stopReason ?? "unknown"})` },
+    );
+  } else if (code === 0 && reply) {
+    process.stdout.write(reply.trim() + "\n");
+  }
   process.exit(code);
 }
 
@@ -135,6 +167,7 @@ async function openSession() {
     try {
       await send("session/resume", { sessionId: saved, cwd, mcpServers: [] });
       process.stderr.write(`[resumed ${saved}]\n`);
+      emit({ type: "session", sessionId: saved, resumed: true });
       return saved;
     } catch (e) {
       process.stderr.write(`[resume of ${saved} refused: ${e.message}; making a new session]\n`);
@@ -144,6 +177,7 @@ async function openSession() {
   const created = await send("session/new", { cwd, mcpServers: [] });
   saveSession(created.sessionId);
   process.stderr.write(`[session ${created.sessionId}]\n`);
+  emit({ type: "session", sessionId: created.sessionId, resumed: false });
   return created.sessionId;
 }
 
@@ -164,6 +198,7 @@ try {
   // reply, and reporting it as one would let a truncated answer look like a complete one.
   finish(stopReason === "end_turn" && reply ? 0 : 1);
 } catch (e) {
+  lastError = e.message;
   process.stderr.write(`[error: ${e.message}]\n`);
   clearInterval(watchdog);
   try { child.kill("SIGKILL"); } catch { /* gone */ }

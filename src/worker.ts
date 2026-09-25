@@ -56,6 +56,7 @@ import {
   STATE_BINDING,
   STATE_MOUNT_PATH,
   STATE_MOUNT_TIMEOUT_MS,
+  STATE_PROBE_TIMEOUT_MS,
   TERMINAL_SHELL,
   WEBSOCKET_UPGRADE,
 } from "./names";
@@ -190,6 +191,7 @@ function describe(): Response {
       { [ROUTE_FIELD]: ROUTE_HEALTHZ, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "liveness; does not wake the sandbox" },
       { [ROUTE_FIELD]: ROUTE_TERMINAL, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "interactive terminal; needs a WebSocket upgrade" },
       { [ROUTE_FIELD]: ROUTE_AGENT, [METHOD_FIELD]: METHOD_POST, [DESCRIPTION_FIELD]: "prompt a session over ACP and read its reply; bounded to one fixed profile" },
+      { [ROUTE_FIELD]: ROUTE_AGENT, [METHOD_FIELD]: "GET + WebSocket", [DESCRIPTION_FIELD]: "the same turn as it happens: send one prompt, receive session/chunk/done frames" },
     ],
   });
 }
@@ -236,8 +238,28 @@ async function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promi
  */
 async function ensureStateMounted(sandbox: Sandbox): Promise<string> {
   const started = Date.now();
-  const probe = await sandbox.exec(
-    `mountpoint -q ${STATE_MOUNT_PATH} && echo ${MOUNTED} || echo not-mounted`,
+  // THE PROBE IS BOUNDED, AND IT HAS TO BE.
+  //
+  // This was the one `exec` in the file with no `timeout`, and the measured cost of that was the
+  // terminal never opening: `wrangler tail` showed `exec` and `getSession` both returning
+  // `outcome=canceled` at 29.7s with no exception, immediately after
+  // `dsh: terminal session ready; backing the session store`, and no `session store backing:` line
+  // ever followed. The inner 30s `withTimeout` below bounds `mountBucket` but cannot help a `mountpoint`
+  // call that never returns, because the timeout wraps the OUTER promise and the request is what gets
+  // canceled - so the route died inside the mount and never reached `session.terminal()`. Every
+  // subsequent alarm then found no container instance to give, which is why the log read
+  // `There is no container instance that can be provided to this Durable Object` once a second.
+  //
+  // A probe that answers "mounted" or "not-mounted" in milliseconds is the normal case; one that
+  // hangs is a broken container, and the store being unbacked for this session is the documented
+  // fallback (the caller below logs it and opens the terminal anyway) rather than a dead route.
+  const probe = await withTimeout(
+    sandbox.exec(
+      `mountpoint -q ${STATE_MOUNT_PATH} && echo ${MOUNTED} || echo not-mounted`,
+      { timeout: STATE_PROBE_TIMEOUT_MS },
+    ),
+    STATE_PROBE_TIMEOUT_MS,
+    "the state mount probe",
   );
   console.log(
     `dsh: state mount probe answered in ${Date.now() - started}ms: ` +
@@ -344,6 +366,100 @@ async function agent(sandbox: Sandbox, request: Request): Promise<Response> {
   });
 }
 
+/**
+ * The same agent surface over a WebSocket, for callers that want the turn as it happens.
+ *
+ * WHY THIS EXISTS ON TOP OF `POST /agent`. The one-shot route holds an HTTP request open for the
+ * whole model turn - measurably the expensive shape here - and it shows the caller nothing until the
+ * turn is over. A WebSocket sends the prompt once and forwards each frame as it arrives, so the
+ * caller sees `session`, then `chunk` per assistant delta, then `done`; the socket is also the live
+ * request that keeps the container awake for exactly as long as somebody is listening, which is the
+ * same property the terminal relies on and the reason neither needs a keepalive.
+ *
+ * THE TRANSPORT IS THE ONLY DIFFERENCE. Both routes run the identical fixed program with the prompt
+ * as an argument, so this adds no capability: there is still no command field, no shell and no
+ * profile selection. `AGENT_ASK_STREAM=1` is what makes `agent-ask` write newline-delimited JSON
+ * instead of a bare reply, and those lines are forwarded verbatim - the Worker parses nothing, so a
+ * framing change cannot silently become an answer.
+ *
+ * ONE PROMPT PER SOCKET, deliberately. The session is shared, and a socket that could queue several
+ * prompts would interleave turns of the same conversation with no ordering the caller can see. Ask,
+ * read the answer, close, reconnect.
+ */
+async function agentStream(sandbox: Sandbox, request: Request): Promise<Response> {
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
+
+  const send = (value: unknown) => {
+    try {
+      server.send(JSON.stringify(value));
+    } catch {
+      // The peer is gone; nothing to report it to.
+    }
+  };
+
+  server.addEventListener("message", async (event) => {
+    let prompt = "";
+    try {
+      const parsed = JSON.parse(typeof event.data === "string" ? event.data : "") as { prompt?: unknown };
+      prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
+    } catch {
+      // Falls through to the empty-prompt error below.
+    }
+    if (prompt.length === 0) {
+      send({ type: "error", message: 'send {"prompt": "..."}' });
+      return;
+    }
+    // Same bound as the POST route, for the same reason: one message must not spend a whole budget.
+    if (prompt.length > 8000) {
+      send({ type: "error", message: "prompt must be 1..8000 characters" });
+      return;
+    }
+
+    send({ type: "started" });
+    let partial = "";
+    // Each container stdout line is one JSON frame from `agent-ask`, forwarded as its own socket
+    // message. A chunk boundary can split a line, so the remainder is kept until its newline lands.
+    const forward = (data: string) => {
+      partial += data;
+      let nl: number;
+      while ((nl = partial.indexOf("\n")) !== -1) {
+        const line = partial.slice(0, nl).trim();
+        partial = partial.slice(nl + 1);
+        if (line.length > 0) send({ type: "frame", raw: line });
+      }
+    };
+
+    try {
+      const result = await sandbox.exec(
+        `AGENT_PROFILE=${ROUTE_AGENT_PROFILE} AGENT_ASK_STREAM=1 ` +
+          `node /usr/local/bin/agent-ask ${JSON.stringify(prompt)}`,
+        {
+          timeout: ROUTE_AGENT_TIMEOUT_MS,
+          stream: true,
+          // stderr carries `agent-ask`'s diagnostics and must not be read as protocol frames.
+          onOutput: (stream, data) => {
+            if (stream === "stdout") forward(data);
+          },
+        },
+      );
+      if (partial.trim().length > 0) send({ type: "frame", raw: partial.trim() });
+      send({ type: "exit", exitCode: result.exitCode ?? 1 });
+    } catch (error) {
+      send({ type: "error", message: describeError(error) });
+    } finally {
+      try {
+        server.close(1000, "turn complete");
+      } catch {
+        // Already closed by the peer.
+      }
+    }
+  });
+
+  return new Response(null, { status: 101, webSocket: client });
+}
+
 /** The interactive terminal: back the session store, then hand the upgrade to the SDK. */
 async function terminal(request: Request, env: Env): Promise<Response> {
   if (request.headers.get("Upgrade")?.toLowerCase() !== WEBSOCKET_UPGRADE) {
@@ -386,6 +502,11 @@ export default {
     if (url.pathname === ROUTE_AGENT) {
       const sandbox = sandboxFor(env);
       await injectSecrets(sandbox, env);
+      // The upgrade is what makes this the streaming surface; without it the same path is the
+      // one-shot JSON route, so a caller that only wants an answer needs no second URL.
+      if (request.headers.get("Upgrade")?.toLowerCase() === WEBSOCKET_UPGRADE) {
+        return await agentStream(sandbox, request);
+      }
       return await agent(sandbox, request);
     }
     if (url.pathname === ROUTE_TERMINAL) return await terminal(request, env);
