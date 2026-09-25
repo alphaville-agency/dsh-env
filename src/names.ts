@@ -141,6 +141,37 @@ export const SESSION_SNAPSHOT_MANIFEST_KEY = "dsh-sessions/MANIFEST.txt";
 export const SESSION_SNAPSHOT_FILE = "/tmp/dsh-sessions.tar.b64";
 
 /**
+ * The log of what the persistence hooks actually did - the capture that runs as a container stops,
+ * and the restore that runs as the next one starts.
+ *
+ * WHY IT EXISTS. Everything about this mechanism is invisible from both ends: the container's disk
+ * is discarded, so a capture leaves no local trace, and the Worker's `console.log` is only reachable
+ * with a Cloudflare API token on the operator's laptop. When the store came back empty there was
+ * therefore no way to tell "the hook never fired" from "the hook fired and the transfer failed" from
+ * "the transfer worked and the store was discarded anyway" - three different faults behind one
+ * symptom, with a different fix each. So every hook writes one line, and the two halves answer each
+ * other: the capture of one boot is read back and printed by the next boot, which is the only moment
+ * anybody can see it.
+ *
+ * The durable copy is a rolling log, newest last and bounded, rather than a single-slot record -
+ * a single slot would be overwritten by the restore that immediately follows a capture, destroying
+ * exactly the evidence the capture exists to leave.
+ */
+export const SESSION_STATUS_KEY = "dsh-sessions/STATUS.txt";
+
+/** How many lines the log keeps. Twenty boots is more history than any diagnosis needs. */
+export const SESSION_STATUS_LINES = 20;
+
+/**
+ * The same log as the session sees it, written at the END of every restore: it describes the boot
+ * that is starting rather than the one that has gone.
+ *
+ * `/tmp`, because it is read seconds later by `bin/dsh-session` in the same container and has no
+ * reason to outlive it. The durable half is `SESSION_STATUS_KEY`.
+ */
+export const SESSION_STATUS_FILE = "/tmp/dsh-persistence";
+
+/**
  * Where a restore is unpacked before it is moved into place.
  *
  * Extracting straight into the store would leave a half-written store if the transfer failed

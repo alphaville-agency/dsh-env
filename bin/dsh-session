@@ -8,6 +8,18 @@
 # session that survives a disconnect: the SDK keeps the PTY alive and replays its output on reconnect,
 # so an injected line would be typed into an already-running TUI.
 #
+# IT ATTACHES TO THE CONVERSATION THAT IS ALREADY THERE. Opening a blank one every time is the defect
+# this file exists to end: the operator's work is in the conversation, and a launcher that starts
+# fresh makes every reconnect look like the environment forgot. `--resume` is the harness's own flag
+# and takes the session id, so nothing here re-implements resuming - it only answers "which one",
+# from the store on disk rather than from a marker file, because the marker is written on a clean
+# exit and a container that sleeps is not a clean exit.
+#
+# AND A REFUSED RESUME MUST NOT COST THE OPERATOR A SESSION. A launch-time `--resume` is an explicit
+# request: the harness fails the boot loudly rather than silently substituting a fresh conversation
+# (`resolveAgent`, dsh-adapter/plugin.js). That is right for a person typing the flag and wrong for a
+# launcher that chose the id itself, so the launcher retries without it and says what happened.
+#
 # PRIMING HAPPENS HERE, BEFORE THE TUI, and that is the correction that makes a session "primed"
 # rather than "primed if you remember". The container's disk resets when it sleeps, so the
 # repositories have to be re-established per session - and a session that opens into an empty
@@ -20,22 +32,73 @@
 # clones. If it fails - no network, no token - the TUI still opens and says so, because a session
 # that refuses to start because GitHub was unreachable is worse than a session without clones.
 #
-# The profile is `dsh-tui`, matching the committed dsh-profile/ manifest. `exec` so the TUI replaces
-# this shell rather than running underneath it - a TUI with a shell parent that outlives it is a
-# process nobody can reach.
+# The profile is `dsh-tui`, matching the committed dsh-profile/ manifest.
+#
+# NOT `exec` ANY MORE. The resume has a fallback, and a fallback needs a process that outlives the
+# first attempt; the TUI still owns the terminal, because this shell waits on it and does nothing
+# else. The cost is one `sh` between the PTY and the TUI, which is the price of the retry.
 set -eu
 
 PROFILE="${DSH_PROFILE:-dsh-tui}"
+DSH_HOME_DIR="${DSH_HOME:-/root/.dsh}"
+STORE="$DSH_HOME_DIR/sessions"
+STATUS_FILE=/tmp/dsh-persistence
 
 if ! command -v dsh >/dev/null 2>&1; then
     echo "dsh is not on PATH. The harness launcher is missing from this image." >&2
     exec sh
 fi
 
-if [ ! -d "${DSH_HOME:-/root/.dsh}/profiles/$PROFILE" ]; then
-    echo "the '$PROFILE' profile is not installed in ${DSH_HOME:-/root/.dsh}/profiles." >&2
+if [ ! -d "$DSH_HOME_DIR/profiles/$PROFILE" ]; then
+    echo "the '$PROFILE' profile is not installed in $DSH_HOME_DIR/profiles." >&2
     echo "expected the committed dsh-profile/ tree to have been materialised at build time." >&2
     exec sh
+fi
+
+# Which container this is. The boot id identifies the INSTANCE rather than the name, so it is the one
+# honest witness that the platform stopped this container and started another - the whole question a
+# persistence test asks, and a value the operator cannot otherwise see from inside a session.
+echo "[boot $(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown) at $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
+
+# The log the Worker's persistence hooks left: what the capture before this boot did, and what the
+# restore that just ran did. Printed because there is nowhere else to see it - the container's disk
+# is discarded, and the Worker's own logs need a Cloudflare API token - and because "the
+# conversation is gone" and "the conversation was never saved" are different problems.
+if [ -s "$STATUS_FILE" ]; then
+    echo "[persistence: what the Worker's hooks reported]"
+    sed 's/^/  /' "$STATUS_FILE" 2>/dev/null || true
+fi
+
+# Every conversation the harness has stored, newest first. The store is one directory per project
+# and one per session beneath it; the harness names the session directory after the session id and
+# writes `session.v3.jsonl.zstd` inside it (`dsh-session-persistence-jsonl`, and `root:
+# dshHomePath('sessions')` in the profile's own patch layer).
+#
+# `ls -1dt` rather than `find -printf '%T@'`: both sort by mtime, and only one of them also exists on
+# the machine this is tested on.
+session_logs() {
+    find -L "$STORE" -name 'session*.jsonl*' -type f 2>/dev/null || true
+}
+
+newest_session_id() {
+    logs=$(session_logs)
+    [ -n "$logs" ] || return 0
+    newest=$(printf '%s\n' "$logs" | tr '\n' '\0' | xargs -0 ls -1dt 2>/dev/null | head -1)
+    [ -n "$newest" ] || return 0
+    basename "$(dirname "$newest")"
+}
+
+echo "[conversations in $STORE]"
+logs=$(session_logs)
+count=$(printf '%s' "$logs" | grep -c . || true)
+if [ "$count" -eq 0 ]; then
+    echo "  none stored yet: this is the first conversation in this container."
+else
+    echo "  $count stored, newest first:"
+    printf '%s\n' "$logs" | tr '\n' '\0' | xargs -0 ls -1dt 2>/dev/null | head -3 | while IFS= read -r log; do
+        size=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+        echo "    $(basename "$(dirname "$log")")  ${size:-0} bytes  ($log)"
+    done
 fi
 
 # Prime the workspace. Deliberately not silent: a session that spent thirty seconds fetching should
@@ -70,5 +133,28 @@ else
     echo "[the capability repository is not in /workspace, so the build state cannot be shown]"
 fi
 echo
+
+RESUME_ID=$(newest_session_id || true)
+# The id is a directory name in the store, and it is about to become an argument. Anything that is
+# not a plain name is not a session id this launcher found, and is not passed on.
+case "$RESUME_ID" in
+    *[!A-Za-z0-9._-]*) RESUME_ID="" ;;
+esac
+
+if [ -n "$RESUME_ID" ]; then
+    echo "[attaching to #$RESUME_ID, the most recent conversation in this container]"
+    # `if`, not `&&`: with `set -e` a failing command in a condition is a result, not the end of the
+    # script. A clean exit from the TUI is the operator finishing, and that is not a retry either.
+    if dsh --profile "$PROFILE" --resume "$RESUME_ID" "$@"; then
+        exit 0
+    fi
+    echo
+    echo "[the harness exited without staying in #$RESUME_ID, so the session above is why. Rather]"
+    echo "[than leave you with no session at all, here is a fresh one. #$RESUME_ID is untouched and]"
+    echo "[can still be picked from /resume inside it.]"
+    echo
+else
+    echo "[no stored conversation to attach to: starting a new one]"
+fi
 
 exec dsh --profile "$PROFILE" "$@"

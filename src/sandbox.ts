@@ -33,6 +33,9 @@
 import { Sandbox as BaseSandbox } from "@cloudflare/sandbox";
 import type { StopParams } from "@cloudflare/containers";
 import {
+  SESSION_STATUS_FILE,
+  SESSION_STATUS_KEY,
+  SESSION_STATUS_LINES,
   SESSION_RESTORE_STAGE_DIR,
   SESSION_SNAPSHOT_FILE,
   SESSION_SNAPSHOT_KEY,
@@ -159,7 +162,19 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * What a transfer did, stated rather than inferred.
+ *
+ * The fields below can be read as if they answered this - `key` empty, `sessions` zero - but each
+ * combination is reachable from more than one situation, and the two that matter most ("there was
+ * nothing in R2 to restore" and "there was, and the store already had better") look identical in
+ * them. One explicit word removes the guesswork from both the log line and the next reader.
+ */
+export type SessionTransferOutcome = "wrote" | "restored" | "kept" | "nothing";
+
 export interface SavedSessions {
+  /** What the transfer did. */
+  outcome: SessionTransferOutcome;
   /** The R2 key the snapshot was written to, or empty when nothing was written. */
   key: string;
   /** Session directories in the snapshot. */
@@ -168,6 +183,57 @@ export interface SavedSessions {
   kib: number;
   /** What could not be read, with the reason. */
   failures: string[];
+}
+
+/**
+ * Read the rolling persistence log back out of R2.
+ *
+ * Best effort in both directions: an unreadable log yields the empty history, which costs the
+ * diagnosis and not the capture.
+ */
+async function readStatusLog(bucket: R2Bucket): Promise<string[]> {
+  try {
+    const object = await bucket.get(SESSION_STATUS_KEY);
+    if (object === null) return [];
+    const body = await object.text();
+    return body.split("\n").filter((line) => line.trim().length > 0);
+  } catch (error) {
+    console.log(`dsh: could not read the persistence log: ${describe(error)}`);
+    return [];
+  }
+}
+
+/**
+ * Record one line about what a persistence hook just did, in the two places it can be seen.
+ *
+ * The durable copy is what makes the capture visible at all: the container it describes is gone by
+ * the time anybody reads it. The local copy is what makes the line visible to the SESSION, which is
+ * the only reader that has no API token - `bin/dsh-session` prints the file before the TUI starts.
+ *
+ * Never throws. The callers run inside `onStart` and inside a shutdown hook, and a diagnostic that
+ * can fail a boot or a stop is worse than no diagnostic: this is the log, not the mechanism.
+ */
+export async function recordPersistence(
+  sandbox: Container,
+  bucket: R2Bucket,
+  kind: string,
+  detail: string,
+): Promise<void> {
+  const line = `${new Date().toISOString()}  ${kind}  ${detail}`;
+  const history = [...(await readStatusLog(bucket)), line].slice(-SESSION_STATUS_LINES);
+  const body = `${history.join("\n")}\n`;
+
+  try {
+    await bucket.put(SESSION_STATUS_KEY, body);
+  } catch (error) {
+    console.log(`dsh: could not write the persistence log: ${describe(error)}`);
+  }
+
+  try {
+    await sandbox.writeFile(SESSION_STATUS_FILE, body);
+  } catch (error) {
+    console.log(`dsh: could not stage the persistence log for the session: ${describe(error)}`);
+  }
 }
 
 /**
@@ -242,7 +308,30 @@ export async function captureSessions(
   bucket: R2Bucket,
   stamp: string,
 ): Promise<SavedSessions> {
-  const result: SavedSessions = { key: "", sessions: 0, kib: 0, failures: [] };
+  const result = await captureSessionsInternal(sandbox, bucket, stamp);
+  await recordPersistence(sandbox, bucket, "capture", describeCapture(result));
+  return result;
+}
+
+/**
+ * What the capture did, in one line, for the log the NEXT boot reads back.
+ *
+ * The three outcomes are the three failures that look identical from the outside, which is the whole
+ * reason this is written down: nothing to save, a save that failed, and a save that worked.
+ */
+function describeCapture(result: SavedSessions): string {
+  if (result.failures.length > 0) return `FAILED: ${result.failures.join("; ")}`;
+  if (result.outcome !== "wrote") return "nothing to save: the store holds no conversation directories";
+  return `saved ${result.sessions} store entr${result.sessions === 1 ? "y" : "ies"}, ` +
+    `${result.kib} KiB to ${result.key}`;
+}
+
+async function captureSessionsInternal(
+  sandbox: Container,
+  bucket: R2Bucket,
+  stamp: string,
+): Promise<SavedSessions> {
+  const result: SavedSessions = { outcome: "nothing", key: "", sessions: 0, kib: 0, failures: [] };
 
   let output: { stdout: string; stderr: string; exitCode: number };
   try {
@@ -286,6 +375,7 @@ export async function captureSessions(
       ].join("\n"),
     );
     result.key = SESSION_SNAPSHOT_KEY;
+    result.outcome = "wrote";
   } catch (error) {
     result.failures.push(`could not write the snapshot to R2: ${describe(error)}`);
   }
@@ -309,7 +399,30 @@ export async function restoreSessions(
   sandbox: Container,
   bucket: R2Bucket,
 ): Promise<SavedSessions> {
-  const result: SavedSessions = { key: SESSION_SNAPSHOT_KEY, sessions: 0, kib: 0, failures: [] };
+  const result = await restoreSessionsInternal(sandbox, bucket);
+  await recordPersistence(sandbox, bucket, "restore", describeRestore(result));
+  return result;
+}
+
+/**
+ * What the restore did, in one line. Restoring, keeping what is already there, and having nothing to
+ * restore are three different situations that all end in "the session is not in the list", so the
+ * log has to say which one happened.
+ */
+function describeRestore(result: SavedSessions): string {
+  if (result.failures.length > 0) return `FAILED: ${result.failures.join("; ")}`;
+  if (result.outcome === "nothing") return "no snapshot in R2: this container starts with nothing to restore";
+  if (result.outcome === "kept") {
+    return `kept the ${result.sessions} conversation directories already on disk`;
+  }
+  return `restored ${result.sessions} conversation director${result.sessions === 1 ? "y" : "ies"}`;
+}
+
+async function restoreSessionsInternal(
+  sandbox: Container,
+  bucket: R2Bucket,
+): Promise<SavedSessions> {
+  const result: SavedSessions = { outcome: "nothing", key: SESSION_SNAPSHOT_KEY, sessions: 0, kib: 0, failures: [] };
 
   let snapshot: R2ObjectBody | null;
   try {
@@ -331,6 +444,7 @@ export async function restoreSessions(
     if (onDisk > 0) {
       result.key = "";
       result.sessions = onDisk;
+      result.outcome = "kept";
       return result;
     }
 
@@ -351,6 +465,7 @@ export async function restoreSessions(
       signal: AbortSignal.timeout(SESSION_TRANSFER_TIMEOUT_MS),
     });
     result.sessions = Number(after.stdout.trim());
+    result.outcome = "restored";
   } catch (error) {
     result.failures.push(`could not restore the session store: ${describe(error)}`);
   }
@@ -439,7 +554,7 @@ export class Sandbox extends BaseSandbox<Env> {
   async captureSessionStore(stamp: string): Promise<void> {
     try {
       const captured = await captureSessions(this.asContainer(), this.env.STATE, stamp);
-      if (captured.key !== "") {
+      if (captured.outcome === "wrote") {
         console.log(
           `dsh: saved ${captured.sessions} session(s) (${captured.kib} KiB) to ${captured.key}`,
         );
@@ -456,7 +571,7 @@ export class Sandbox extends BaseSandbox<Env> {
   async restoreSessionStore(): Promise<void> {
     try {
       const restored = await restoreSessions(this.asContainer(), this.env.STATE);
-      if (restored.key !== "") {
+      if (restored.outcome === "restored") {
         console.log(`dsh: restored ${restored.sessions} session(s) from ${SESSION_SNAPSHOT_KEY}`);
       }
       for (const failure of restored.failures) {
