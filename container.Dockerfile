@@ -184,13 +184,22 @@ RUN dsh plugin --profile acp add "${DSH_TUI_BUNDLE}" @deepseek-ai/dsh-acp-app \
 # the TUI works is the whole argument - it proves the model route and agent creation are fine here, so
 # the stall belongs to the ACP application, and this is the surface that does not depend on it.
 #
-# dsh-base is named explicitly: `dsh plugin add` records the bundle it is given, and the headless
-# application is a layer OVER the base tree rather than a replacement for it.
-RUN dsh plugin --profile headless add @deepseek-ai/dsh-base @deepseek-ai/dsh-headless \
- && node -e "const f='/root/.dsh/profiles/headless/package.json';const fs=require('fs');const d=JSON.parse(fs.readFileSync(f,'utf8'));d.dsh.profile.patchReload='startup';fs.writeFileSync(f,JSON.stringify(d,null,2)+'\n')" \
- && node -e "const d=require('/root/.dsh/profiles/headless/package.json');if(d.dsh.profile.patchReload!=='startup'){throw new Error('patchReload was not set')}" \
- && npm cache clean --force \
- && rm -rf /root/.npm
+# WHY THIS DOES NOT RUN `dsh plugin --profile headless add`, WHICH IS HOW THE OTHER PROFILES ARE MADE.
+# That path runs pnpm, and pnpm cannot resolve this profile's tree from the registry:
+#
+#   dsh: pnpm failed in profile directory /root/.dsh/profiles/headless
+#   ERR_PNPM_FETCH_404  @deepseek-ai%2Fdsh-bash-env: Not Found
+#
+# `@deepseek-ai/dsh-headless` depends on a package that is not published, so the install fails and the
+# image does not build. The packages themselves are not missing, though: they are dependencies of the
+# `dsh` CLI that is already installed in this image, so they are present under its own node_modules.
+# Naming that tree as the profile's tree gives the loader the same packages pnpm would have fetched,
+# with no registry access at all.
+RUN mkdir -p /root/.dsh/profiles/headless \
+ && printf '%s' '{"name":"dsh-profile-headless","private":true,"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-headless"],"patchReload":"startup"}}}' \
+      > /root/.dsh/profiles/headless/package.json \
+ && ln -sfn /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules /root/.dsh/profiles/headless/node_modules \
+ && node -e "const p=require.resolve('@deepseek-ai/dsh-headless',{paths:['/root/.dsh/profiles/headless']});if(!p){throw new Error('unresolved')}console.log('headless bundle resolves from '+p)"
 
 # Turn OFF live patch reloading, which is a laptop feature and cannot work here.
 #
