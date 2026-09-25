@@ -18,7 +18,7 @@
 // retry - is the real script.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, utimesSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -185,29 +185,6 @@ test("a clean exit from an attached TUI is the end, not a retry", () => {
 
   assert.equal(status, 0);
   assert.equal(calls.length, 1, "an ordinary quit must not open a second TUI");
-});
-
-test("prints the Worker's persistence log, which is the only place it can be seen", () => {
-  const home = makeHome();
-  makeStore(home, [{ id: NEWER, mtime: "2026-09-25T02:19:15Z" }]);
-  // The real path, because that is the path the Worker writes and the launcher reads. Nothing else
-  // in this suite depends on it, and it is removed again below.
-  const statusFile = "/tmp/dsh-persistence";
-  writeFileSync(
-    statusFile,
-    "2026-09-25T02:31:07.000Z  capture  saved 1 store entry, 42 KiB to the snapshot\n" +
-      "2026-09-25T02:39:12.000Z  restore  restored 1 conversation directory\n",
-  );
-
-  try {
-    const { stdout } = run(home);
-
-    assert.match(stdout, /persistence: what the Worker's hooks reported/);
-    assert.match(stdout, /capture {2}saved 1 store entry/);
-    assert.match(stdout, /restore {2}restored 1 conversation directory/);
-  } finally {
-    rmSync(statusFile, { force: true });
-  }
 });
 
 test("the launcher exists and is executable in the image", () => {

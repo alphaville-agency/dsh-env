@@ -20,6 +20,12 @@
 # (`resolveAgent`, dsh-adapter/plugin.js). That is right for a person typing the flag and wrong for a
 # launcher that chose the id itself, so the launcher retries without it and says what happened.
 #
+# AND THE STORE IT ATTACHES TO IS BACKED BY R2. The container's disk is discarded when it sleeps, so
+# a conversation written to `/root/.dsh/sessions` and nothing else is gone at the next wake, and the
+# attach logic above finds an empty store and starts fresh. The Worker mounts the state bucket at
+# `/mnt/state` before this script runs, and this script symlinks the store into it. The mount and the
+# symlink are explained where they are made, further down.
+#
 # PRIMING HAPPENS HERE, BEFORE THE TUI, and that is the correction that makes a session "primed"
 # rather than "primed if you remember". The container's disk resets when it sleeps, so the
 # repositories have to be re-established per session - and a session that opens into an empty
@@ -42,7 +48,6 @@ set -eu
 PROFILE="${DSH_PROFILE:-dsh-tui}"
 DSH_HOME_DIR="${DSH_HOME:-/root/.dsh}"
 STORE="$DSH_HOME_DIR/sessions"
-STATUS_FILE=/tmp/dsh-persistence
 HARNESS_ERR=/tmp/dsh-harness.err
 
 show_harness_stderr() {
@@ -85,13 +90,59 @@ else
     echo "[harness $(dsh --version 2>/dev/null | head -1) · the dsh-tui package is not in the profile]"
 fi
 
-# The log the Worker's persistence hooks left: what the capture before this boot did, and what the
-# restore that just ran did. Printed because there is nowhere else to see it - the container's disk
-# is discarded, and the Worker's own logs need a Cloudflare API token - and because "the
-# conversation is gone" and "the conversation was never saved" are different problems.
-if [ -s "$STATUS_FILE" ]; then
-    echo "[persistence: what the Worker's hooks reported]"
-    sed 's/^/  /' "$STATUS_FILE" 2>/dev/null || true
+# The store that has to outlive the container is backed by R2, mounted by the Worker at
+# $DSH_STATE_MOUNT (src/worker.ts, `ensureStateMounted`) before this PTY opens. THE SYMLINK IS MADE
+# HERE, and here rather than in the image because this is the last moment before the harness reads
+# the store: `dsh` creates the store directory if it is missing, and one created as a real directory
+# is on the ephemeral disk.
+#
+# A SYMLINK, NOT A MOUNT OVER THE STORE. s3fs refuses a mount point that is not empty, and the store
+# is non-empty the moment a conversation exists - which is what defeated the earlier attempt to mount
+# over it. The bucket is mounted at an unused path and this path is linked into it.
+#
+# THE CHECK IS `mountpoint`, RUN IN THE CONTAINER, because that is ground truth. A directory that
+# merely exists is not a backing: the SDK `mkdir -p`s the mount path on the way to a mount that may
+# then fail, and linking the store into an empty local directory would look like success while
+# quietly losing everything at the next sleep.
+#
+# AND IF THE MOUNT IS NOT THERE, THE SESSION STILL OPENS. This is a report, not a gate: a workspace
+# whose store is local is still a workspace, and refusing the terminal because a mount failed would
+# be a worse failure than the one it describes.
+STATE_MOUNT="${DSH_STATE_MOUNT:-/mnt/state}"
+# One place names the subdirectory: the store's own basename. `basename` is in the image's coreutils.
+STATE_STORE="$STATE_MOUNT/$(basename "$STORE")"
+
+is_mount_point() {
+    if command -v mountpoint >/dev/null 2>&1; then
+        mountpoint -q "$1"
+    else
+        # No `mountpoint` (macOS, where this is tested): compare the device of the path with its
+        # parent's, and only a mounted filesystem has its own. `dirname` on `/` yields `/`, which is
+        # handled by refusing to call the root of the filesystem a mount of itself.
+        parent=$(dirname "$1")
+        [ "$parent" != "$1" ] || return 1
+        [ "$(df -P "$1" 2>/dev/null | awk 'NR==2 {print $1}')" != \
+          "$(df -P "$parent" 2>/dev/null | awk 'NR==2 {print $1}')" ]
+    fi
+}
+
+if is_mount_point "$STATE_MOUNT"; then
+    mkdir -p "$STATE_STORE" 2>/dev/null || true
+    # A store that is a real directory holds bytes from before the mount was there. Move them into
+    # the backing before replacing the directory with a link, so the upgrade costs nobody a
+    # conversation. `cp -a` then `rm` rather than `mv`: a cross-filesystem `mv` is a copy, and this
+    # one has to be allowed to fail without leaving the store path half-gone.
+    if [ -d "$STORE" ] && [ ! -L "$STORE" ]; then
+        cp -a "$STORE/." "$STATE_STORE/" 2>/dev/null || true
+        rm -rf "$STORE"
+    fi
+    mkdir -p "$DSH_HOME_DIR" 2>/dev/null || true
+    ln -sfn "$STATE_STORE" "$STORE"
+    echo "[session store backed by R2: $STORE -> $STATE_STORE]"
+else
+    echo "[the session store is NOT backed by R2: $STATE_MOUNT is not a mount point]"
+    echo "[conversations in this container will not survive it, and the Worker's log says why. The]"
+    echo "[session itself is unaffected: the store below is a directory on this container's disk.]"
 fi
 
 # Every conversation the harness has stored, newest first. The store is one directory per project

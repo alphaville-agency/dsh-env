@@ -55,23 +55,6 @@ export const ROUTE_TERMINAL = "/ws/terminal";
 export const ROUTE_ROOT = "/";
 
 /**
- * The persistence log, read back out of R2.
- *
- * WHY THIS IS A ROUTE AND NOT JUST A LOG. The two halves of this mechanism run where nobody can see
- * them: the capture runs as a container is being discarded, so it leaves nothing behind, and the
- * restore runs inside `onStart`, before any session exists to report it. Cloudflare keeps the
- * Worker's `console.log` only for a window and only for a caller holding an API token. So a
- * conversation that does not come back is indistinguishable from a store that was never written,
- * and the operator's report is "it is gone again" with no way to say which.
- *
- * This is READ-ONLY and it does NOT touch the sandbox: reading it must never wake a stopped
- * container, because a status check that costs money and resets the sleep timer is a check nobody
- * can afford to run. It answers two questions the session cannot - whether a snapshot exists at all,
- * and what the last hooks thought they did.
- */
-export const ROUTE_PERSISTENCE = "/persistence";
-
-/**
  * What the terminal runs, and there is deliberately no way to ask for anything else.
  *
  * The terminal attaches to a STABLE session - that is what makes a reconnect replay the scrollback
@@ -120,115 +103,44 @@ export const METHOD_POST = "POST";
 export const WEBSOCKET_UPGRADE = "websocket";
 
 /**
- * The R2 binding for durable state.
+ * The R2 binding for durable state, and the path the bucket is mounted at inside the container.
  *
- * NOTE: nothing mounts this. s3fs was measured failing three separate ways - refusing a non-empty
- * mountpoint, returning `Input/output error` on `ls` after a mount that reported success, and being
- * unusably slow for a git/npm workload - so the mount is not on the path to anything and its
- * plumbing is gone rather than parked. The binding stays declared because the bucket exists and is
- * the intended home for bytes that must outlive a container; git remains the source of truth for
- * work, and the trade-off is explicit: uncommitted work is lost when the container is replaced.
+ * THE MOUNT IS THE PERSISTENCE. Everything outside it is on the container's ephemeral disk and is
+ * gone at the next wake - `/workspace` included, deliberately: s3fs was measured unusably slow for a
+ * git/npm workload, so the working tree stays local and git stays the source of truth for work. What
+ * is mounted is the one thing the operator asked to keep: the harness's conversation store, which is
+ * small JSONL files rather than a build tree.
+ *
+ * WHY THE MOUNT PATH IS EMPTY AND THE STORE IS A SYMLINK. s3fs refuses a non-empty mount point, and
+ * `/root/.dsh/sessions` is non-empty the moment a conversation exists - that is what defeated an
+ * earlier attempt to mount over the store itself. So the bucket is mounted at a path nothing else
+ * uses, and `bin/dsh-session` links the real store into it before the harness reads it.
+ *
+ * The mount is made from the terminal route in src/worker.ts, immediately before the PTY opens,
+ * because that is tied to a real request. It is deliberately NOT made from a lifecycle hook: two
+ * earlier attempts put the restore and the capture in `onStart`/`onActivityExpired`, and after an
+ * eight-minute sleep the container still came back with an empty store.
  */
 export const STATE_BINDING = "STATE";
+export const STATE_MOUNT_PATH = "/mnt/state";
 
 /**
- * The harness's conversation store inside the container, and the snapshot of it that outlives a
- * sleep.
+ * The harness's conversation store inside the container.
  *
- * WHY IT IS HERE. The container's disk is discarded when it stops, so `/root/.dsh/sessions` - where
- * the harness keeps every conversation, one directory per session - does not survive, and the
- * resume picker shows `0 sessions` on the next boot. The store is NOT under `/workspace`, which is
- * why the SDK's own `createBackup` cannot address it: `DirectoryBackup.dir` must be under
- * `/workspace`, `/home`, `/tmp`, `/var/tmp` or `/app` (sandbox-BtaWcmmG.d.ts, `interface
- * DirectoryBackup`), and its production restore path mounts the archive through s3fs + a FUSE
- * overlay, which this environment measured unusable. So the snapshot is a tar of the store,
- * carried over `exec` as base64 - the same route src/sandbox.ts already uses for uncommitted work.
+ * WHY IT IS A SYMLINK TARGET RATHER THAN A DIRECTORY. The container's disk is discarded when it
+ * stops, so this path does not survive a sleep, and the resume picker shows `0 sessions` on the next
+ * boot. It is NOT under `/workspace`, which is why the SDK's own `createBackup` cannot address it:
+ * `DirectoryBackup.dir` must be under `/workspace`, `/home`, `/tmp`, `/var/tmp` or `/app`, and its
+ * production restore path mounts the archive through s3fs + a FUSE overlay.
+ *
+ * The bytes live in R2 under `STATE_MOUNT_PATH`; this path is the harness's fixed idea of where the
+ * store is, and `bin/dsh-session` points it at the mount with a symlink. If the mount is not there,
+ * the path stays an ordinary directory on the ephemeral disk: the store is then not persistent, but
+ * the session still opens, which is the property that matters more.
  *
  * `$DSH_HOME` is `/root/.dsh` in the image (container.Dockerfile), so the store is this path.
  */
 export const SESSION_STORE_DIR = "/root/.dsh/sessions";
-
-/** Where the session snapshot lives in R2 (`STATE`). One key: the newest snapshot replaces it. */
-export const SESSION_SNAPSHOT_KEY = "dsh-sessions/sessions.tar.b64";
-
-/** What the snapshot holds, readable without decoding it. Rewritten with every capture. */
-export const SESSION_SNAPSHOT_MANIFEST_KEY = "dsh-sessions/MANIFEST.txt";
-
-/** Where the base64 snapshot is staged inside the container before it is decoded. */
-export const SESSION_SNAPSHOT_FILE = "/tmp/dsh-sessions.tar.b64";
-
-/**
- * How much of a payload one `exec` carries when something has to be written into the container.
- *
- * The pieces are passed as base64 on the command line and decoded in the container, which keeps the
- * text out of the shell's quoting rules entirely - these payloads carry other programs' error
- * messages and, for a snapshot, a whole base64 tar. The bound is the kernel's `ARG_MAX` (2 MB by
- * default, and that is the total for arguments AND environment), so this is a quarter of it: a
- * megabyte of sessions is sixteen round trips rather than one command that fails at the limit.
- */
-export const SESSION_STAGE_CHUNK_CHARS = 64 * 1024;
-
-/**
- * The log of what the persistence hooks actually did - the capture that runs as a container stops,
- * and the restore that runs as the next one starts.
- *
- * WHY IT EXISTS. Everything about this mechanism is invisible from both ends: the container's disk
- * is discarded, so a capture leaves no local trace, and the Worker's `console.log` is only reachable
- * with a Cloudflare API token on the operator's laptop. When the store came back empty there was
- * therefore no way to tell "the hook never fired" from "the hook fired and the transfer failed" from
- * "the transfer worked and the store was discarded anyway" - three different faults behind one
- * symptom, with a different fix each. So every hook writes one line, and the two halves answer each
- * other: the capture of one boot is read back and printed by the next boot, which is the only moment
- * anybody can see it.
- *
- * The durable copy is a rolling log, newest last and bounded, rather than a single-slot record -
- * a single slot would be overwritten by the restore that immediately follows a capture, destroying
- * exactly the evidence the capture exists to leave.
- */
-export const SESSION_STATUS_KEY = "dsh-sessions/STATUS.txt";
-
-/** How many lines the log keeps. Twenty boots is more history than any diagnosis needs. */
-export const SESSION_STATUS_LINES = 20;
-
-/**
- * The same log as the session sees it, written at the END of every restore: it describes the boot
- * that is starting rather than the one that has gone.
- *
- * `/tmp`, because it is read seconds later by `bin/dsh-session` in the same container and has no
- * reason to outlive it. The durable half is `SESSION_STATUS_KEY`.
- */
-export const SESSION_STATUS_FILE = "/tmp/dsh-persistence";
-
-/**
- * Where a restore is unpacked before it is moved into place.
- *
- * Extracting straight into the store would leave a half-written store if the transfer failed
- * midway, and the next boot would read that half-store as "the container already has sessions" and
- * refuse to restore again. Nothing lands in the store until the whole archive has decoded.
- */
-export const SESSION_RESTORE_STAGE_DIR = "/root/.dsh/.sessions-restore";
-
-/**
- * The bound on what a snapshot keeps, because the store grows without limit - one directory per
- * conversation, forever, and the local one is already 157 MB.
- *
- * The newest N session directories by mtime, and the newest at least: the budget is only consulted
- * from the second session on, so a single oversized session is still captured rather than lost.
- * `du -sk` measures the directories, so this is a ceiling on the tar, before base64 inflates it by
- * a third.
- */
-export const SESSION_SNAPSHOT_MAX_SESSIONS = 20;
-export const SESSION_SNAPSHOT_MAX_KIB = 8 * 1024;
-
-/**
- * How long a session transfer may take before it is abandoned.
- *
- * Both directions run inside a lifecycle hook - `onStart` before the container is usable,
- * `onActivityExpired` while the platform is waiting to stop it - so a hung transfer must not hold
- * the lifecycle open. A stopped container with no sessions is recoverable; one that never finishes
- * starting is not.
- */
-export const SESSION_TRANSFER_TIMEOUT_MS = 30_000;
 
 /**
  * Request and response field names. Protocol tokens stay inline; anything the JSON contract of
@@ -241,11 +153,3 @@ export const ROUTE_FIELD = "route";
 export const METHOD_FIELD = "method";
 export const DESCRIPTION_FIELD = "description";
 export const ERROR_FIELD = "error";
-
-/** The persistence report's own field names; see `persistence` in src/worker.ts. */
-export const SNAPSHOT_FIELD = "snapshot";
-export const LOG_FIELD = "log";
-export const KEY_FIELD = "key";
-export const SIZE_FIELD = "size";
-export const UPLOADED_FIELD = "uploaded";
-export const NOTE_FIELD = "note";

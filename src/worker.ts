@@ -29,35 +29,29 @@
 // bypasses the whole application rather than one route. A liveness probe therefore needs the
 // service token; that is a smaller price than an administratively-open host to keep one route free.
 //
-// The lease Durable Object, the R2 mount and the provisioner are not coming back in their old form:
-// the lease had nothing to arbitrate for one operator, and s3fs was measured unusable three ways.
+// The lease Durable Object and the provisioner are not coming back in their old form: the lease had
+// nothing to arbitrate for one operator. The R2 mount IS back, one route below, and in a narrower
+// shape than the attempt that was abandoned: it backs the harness's session store and nothing else,
+// because s3fs was measured unusably slow for the git/npm workload that `/workspace` carries.
 import {
   DESCRIPTION_FIELD,
-  ERROR_FIELD,
   GH_TOKEN_ENV,
-  KEY_FIELD,
-  LOG_FIELD,
   METHOD_FIELD,
   METHOD_GET,
   MODEL_KEY_ENV,
-  NOTE_FIELD,
   OK_FIELD,
   ROUTES_FIELD,
   ROUTE_FIELD,
   ROUTE_HEALTHZ,
-  ROUTE_PERSISTENCE,
   ROUTE_ROOT,
   ROUTE_TERMINAL,
   SANDBOX_ID,
   SERVICE_FIELD,
   SERVICE_NAME,
-  SIZE_FIELD,
   SLEEP_AFTER,
-  SNAPSHOT_FIELD,
-  SESSION_SNAPSHOT_KEY,
-  SESSION_STATUS_KEY,
+  STATE_BINDING,
+  STATE_MOUNT_PATH,
   TERMINAL_SHELL,
-  UPLOADED_FIELD,
   WEBSOCKET_UPGRADE,
 } from "./names";
 import { getSandbox, type SandboxOptions } from "@cloudflare/sandbox";
@@ -189,40 +183,65 @@ function describe(): Response {
     [ROUTES_FIELD]: [
       { [ROUTE_FIELD]: ROUTE_ROOT, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "this description" },
       { [ROUTE_FIELD]: ROUTE_HEALTHZ, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "liveness; does not wake the sandbox" },
-      { [ROUTE_FIELD]: ROUTE_PERSISTENCE, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "what the persistence hooks did, and whether a snapshot exists; does not wake the sandbox" },
       { [ROUTE_FIELD]: ROUTE_TERMINAL, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "interactive terminal; needs a WebSocket upgrade" },
     ],
   });
 }
 
-/**
- * What the persistence hooks have done, and whether there is a snapshot to restore from.
- *
- * Read-only, R2 only, and deliberately incapable of starting the container: the question it answers
- * ("is the conversation store actually being saved?") is asked most often right after the container
- * has stopped, which is exactly when waking it would destroy the evidence.
- */
-async function persistence(env: Env): Promise<Response> {
-  const snapshot = await env.STATE.head(SESSION_SNAPSHOT_KEY);
-  const log = await env.STATE.get(SESSION_STATUS_KEY);
+/** What the mount probe prints, so the answer is matched by name rather than by exit code alone. */
+const MOUNTED = "STATE-MOUNTED";
 
-  return Response.json({
-    [SNAPSHOT_FIELD]: snapshot === null
-      ? null
-      : {
-          [KEY_FIELD]: SESSION_SNAPSHOT_KEY,
-          [SIZE_FIELD]: snapshot.size,
-          [UPLOADED_FIELD]: snapshot.uploaded.toISOString(),
-        },
-    [LOG_FIELD]: log === null ? [] : (await log.text()).split("\n").filter((line) => line !== ""),
-    [NOTE_FIELD]:
-      "A capture line means the hook ran as a container was stopped; a restore line means the next " +
-      "boot read it. No line at all means the hook never ran, which is a different fault from a " +
-      "capture that failed.",
-  });
+/**
+ * Back the container's session store with R2, before the PTY that will read it opens.
+ *
+ * WHY THIS IS HERE AND NOT IN A LIFECYCLE HOOK. Two earlier attempts restored and captured the store
+ * from `onStart`/`onActivityExpired`; after an eight-minute sleep the container still came back cold,
+ * re-cloned its repositories and printed `[no stored conversation to attach to: starting a new one]`.
+ * A hook is a maybe. This runs where the operator actually arrives - a `GET /ws/terminal` upgrade is
+ * a real request, and it is the same request that starts a stopped container - so the backing is
+ * established on exactly the path that reads it.
+ *
+ * WHY IT ASKS THE CONTAINER FIRST. `s3fs` refuses a mount point that already has a mount, and the
+ * SDK's own bookkeeping (`activeMounts`) lives in the Durable Object's memory, where it can outlive
+ * the container it describes. `mountpoint` inside the container is the ground truth; when it says
+ * the path is mounted, there is nothing to do and nothing to re-do.
+ *
+ * WHY A FAILURE IS SWALLOWED. This gates a terminal. A container whose store could not be backed is
+ * still a usable workspace with a local session store, and failing the upgrade instead would trade
+ * `./dsh.sh` for an error page describing a problem the operator cannot act on. So the failure is
+ * logged and the terminal opens; `bin/dsh-session` independently reports whether the store is backed,
+ * from inside the container, which is where the operator can see it.
+ */
+async function ensureStateMounted(sandbox: Sandbox): Promise<string> {
+  const probe = await sandbox.exec(
+    `mountpoint -q ${STATE_MOUNT_PATH} && echo ${MOUNTED} || echo not-mounted`,
+  );
+  if (probe.stdout.includes(MOUNTED)) return "already mounted";
+
+  const mount = () => sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {});
+  try {
+    await mount();
+  } catch (first) {
+    // The SDK may still hold a mount record for a container that is gone, and it refuses a second
+    // mount at a path it believes is in use. Clearing that record is what lets the retry reach s3fs
+    // at all; the unmount of a mount that is not there is itself an error, and not an interesting
+    // one, because the mount below is the thing being attempted.
+    try {
+      await sandbox.unmountBucket(STATE_MOUNT_PATH);
+    } catch {
+      // Deliberately ignored: see above.
+    }
+    await mount();
+    return "mounted after clearing a stale mount record";
+  }
+  return "mounted";
 }
 
-/** The interactive terminal: hand the upgrade to the SDK's stable session API. */
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The interactive terminal: back the session store, then hand the upgrade to the SDK. */
 async function terminal(request: Request, env: Env): Promise<Response> {
   if (request.headers.get("Upgrade")?.toLowerCase() !== WEBSOCKET_UPGRADE) {
     return new Response("the terminal route needs a WebSocket upgrade", { status: 426 });
@@ -231,6 +250,15 @@ async function terminal(request: Request, env: Env): Promise<Response> {
   // The explicit session is what makes this type-safe; see TERMINAL_SESSION and SANDBOX_OPTIONS.
   const sandbox = sandboxFor(env);
   await injectSecrets(sandbox, env);
+
+  try {
+    console.log(`dsh: session store backing: ${await ensureStateMounted(sandbox)}`);
+  } catch (error) {
+    console.log(
+      `dsh: could not back the session store with R2: ${describeError(error)}. The terminal still ` +
+        `opens; the store is on the container's ephemeral disk for this session.`,
+    );
+  }
 
   const session = await sandbox.getSession(TERMINAL_SESSION);
   return await session.terminal(request, { shell: TERMINAL_SHELL });
@@ -241,10 +269,6 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === METHOD_GET && url.pathname === ROUTE_HEALTHZ) return health();
-    if (request.method === METHOD_GET && url.pathname === ROUTE_PERSISTENCE) {
-      return await persistence(env);
-    }
-
     if (request.method === METHOD_GET && url.pathname === ROUTE_ROOT) return describe();
     if (url.pathname === ROUTE_TERMINAL) return await terminal(request, env);
 

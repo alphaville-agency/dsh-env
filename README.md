@@ -108,16 +108,37 @@ dsh-prime         # fetch or refresh the repositories (first thing, every sessio
 it sleeps, so a clone cannot be baked at build time and would be stale if it were, and running it
 behind the TUI would put a network clone on the path to a prompt.
 
-**The container is ephemeral, and you do not have to manage that.** Cloudflare documents it plainly -
-"all disk is ephemeral … the next time it is started, it will have a fresh disk as defined by its
-container image" - and this was verified here rather than assumed: a marker file written to
-`/workspace` was gone seven minutes later and the container's boot id had changed. Snapshots
-("coming soon") and FUSE-to-R2 are the only persistence the platform offers; FUSE was measured
-failing three separate ways, and its own docs warn against expecting SSD-like performance.
+**The container is ephemeral. The conversations are not, and neither is what you push.** Cloudflare
+documents it plainly - "all disk is ephemeral … the next time it is started, it will have a fresh
+disk as defined by its container image" - and this was verified here rather than assumed: a marker
+file written to `/workspace` was gone seven minutes later and the container's boot id had changed.
 
-So the working tree genuinely does not survive. What that does NOT mean is that you are responsible
-for remembering. The platform announces the shutdown - `onActivityExpired()` when the sleep timer
-fires, `onStop()` when the container exits - and `src/sandbox.ts` uses both to copy uncommitted
+What survives is the harness's session store, `/root/.dsh/sessions`, because it is **mounted from R2
+rather than copied to it**. `GET /ws/terminal` mounts the `STATE` bucket at `/mnt/state`
+(`sandbox.mountBucket`, binding `STATE` → `af-shared-tooling-dsh`) immediately before it opens the
+PTY, and `bin/dsh-session` symlinks the store into that mount before the harness reads it.
+
+The mount is a **request**, not a lifecycle hook, and that is the correction: two earlier attempts
+restored and captured the store from `onStart`/`onActivityExpired`, so the work happened in a hook
+that may not fire, and after an eight-minute sleep the container still came back with `[no stored
+conversation to attach to: starting a new one]`. A terminal upgrade is a real request on the path
+that reads the store, so the backing is established exactly there.
+
+The mount point is an **empty** path and the store is a **symlink** into it, which is the other
+correction: s3fs refuses a non-empty mount point, and `/root/.dsh/sessions` is non-empty the moment a
+conversation exists - which is what defeated the attempt to mount over the store itself.
+
+**A mount that fails does not cost the session.** The mount is wrapped, logged and continued: the
+terminal opens either way, and `bin/dsh-session` reports from inside the container whether the store
+is really backed (`mountpoint -q`, not "the directory exists" - the SDK `mkdir -p`s the mount path on
+the way to a mount that may then fail). If it is not backed, the store is an ordinary directory on the
+ephemeral disk, and the launcher says so in the session.
+
+`/workspace` is deliberately **not** on FUSE. That was the earlier attempt, and it was measured
+unusable for a git/npm workload - which the platform's own storage docs warn about ("do not expect
+SSD-like performance"). Git stays the source of truth for work, and what the working tree gets
+instead is a safety net: the platform announces the shutdown - `onActivityExpired()` when the sleep
+timer fires, `onStop()` when the container exits - and `src/sandbox.ts` uses both to copy uncommitted
 changes and untracked files out to R2 before the disk is discarded.
 
 That is a safety net, not a workflow. **Pushing is still how work leaves this environment**: the

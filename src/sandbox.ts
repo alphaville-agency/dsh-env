@@ -1,51 +1,38 @@
 /**
- * The Sandbox subclass, which exists for one reason: to save work before the container is stopped.
+ * The Sandbox subclass, which exists for one reason: to save uncommitted WORK before the container
+ * is stopped.
  *
  * WHY THIS CLASS EXISTS AT ALL. The platform documents that all disk is ephemeral - "when a Container
  * instance goes to sleep, the next time it is started, it will have a fresh disk as defined by its
- * container image". FUSE against R2 is the only persistence Cloudflare offers today, its own docs
- * warn not to expect SSD-like performance, and this environment measured it failing three separate
- * ways. So the working tree genuinely does not survive a sleep.
- *
- * The obvious answer - "commit and push before you stop" - pushes a machine's problem onto a person,
- * and it is exactly the kind of step that gets forgotten at the end of a session. It is also not
- * necessary, because the platform tells us when it is about to stop: `onActivityExpired()` runs when
- * the sleep timer expires, and `onStop()` runs when the container process exits. Both run Worker code
- * with the container still reachable.
- *
- * So the save happens here, in the one moment it can, rather than being delegated to discipline.
+ * container image". The obvious answer - "commit and push before you stop" - pushes a machine's
+ * problem onto a person, and it is exactly the kind of step that gets forgotten at the end of a
+ * session. It is also not necessary, because the platform tells us when it is about to stop:
+ * `onActivityExpired()` runs when the sleep timer expires, and `onStop()` runs when the container
+ * process exits. Both run Worker code with the container still reachable.
  *
  * WHAT THIS DOES NOT DO. It does not commit anything. A session's work is the agent's or the
  * operator's to describe, and an automatic commit with a generated message produces history nobody
  * can read - which is worse than an honest uncommitted tree. What it does is make the UNCOMMITTED
  * work leave the container: a patch, and a bundle of untracked files, written to R2 through the
- * binding. A person or an agent can then recover it on the next session.
+ * binding.
  *
  * It also cannot save what it cannot reach: an agent that is mid-edit when the timer fires gets
  * whatever exists at that instant.
  *
- * THE OTHER THING THAT LEAVES HERE IS THE CONVERSATION. `captureUncommittedWork` covers the working
- * tree; `captureSessions` covers `/root/.dsh/sessions`, which is where the harness keeps every
- * conversation. They are two payloads of one idea - get bytes out of a disk that is about to be
- * discarded - and they share these hooks rather than having a mechanism of their own. The
- * conversation is restored on `onStart`, before anything can use the container.
+ * THIS FILE NO LONGER TOUCHES THE CONVERSATION STORE, AND THAT IS THE POINT. An earlier version
+ * captured `/root/.dsh/sessions` on these same hooks and restored it in `onStart`. After an
+ * eight-minute sleep the container still came back cold, re-cloned its repositories and printed
+ * `[no stored conversation to attach to: starting a new one]`. So the store is no longer copied at
+ * all: it is MOUNTED. The Worker mounts the R2 bucket at `/mnt/state` from the terminal route,
+ * immediately before the PTY opens (src/worker.ts, `ensureStateMounted`), and `bin/dsh-session`
+ * symlinks `/root/.dsh/sessions` into it. One mechanism, on the path that actually runs.
+ *
+ * What is left here is the other payload, which has no mount and could not have one: `/workspace`
+ * is a git working tree, and s3fs was measured unusably slow for that workload. It is captured on
+ * the shutdown hooks, where the platform says the container is about to go.
  */
 import { Sandbox as BaseSandbox } from "@cloudflare/sandbox";
 import type { StopParams } from "@cloudflare/containers";
-import {
-  SESSION_STATUS_FILE,
-  SESSION_STATUS_KEY,
-  SESSION_STATUS_LINES,
-  SESSION_STAGE_CHUNK_CHARS,
-  SESSION_RESTORE_STAGE_DIR,
-  SESSION_SNAPSHOT_FILE,
-  SESSION_SNAPSHOT_KEY,
-  SESSION_SNAPSHOT_MANIFEST_KEY,
-  SESSION_SNAPSHOT_MAX_KIB,
-  SESSION_SNAPSHOT_MAX_SESSIONS,
-  SESSION_STORE_DIR,
-  SESSION_TRANSFER_TIMEOUT_MS,
-} from "./names";
 
 /**
  * The container calls this file makes, structurally.
@@ -58,7 +45,6 @@ interface Container {
     command: string,
     options?: { signal?: AbortSignal },
   ): Promise<{ stdout: string; stderr: string; exitCode: number; success?: boolean }>;
-  writeFile(path: string, content: string): Promise<unknown>;
 }
 
 export interface SavedWork {
@@ -151,6 +137,9 @@ export async function captureUncommittedWork(
       ``,
       `This is a safety net, not a workflow. Pushing is still how work leaves this environment:`,
       `this capture only exists for what was not pushed.`,
+      ``,
+      `The CONVERSATION is not here. It is not copied at shutdown at all: the session store is`,
+      `mounted from R2 before the terminal opens, so it is never on the ephemeral disk to lose.`,
     ]
       .filter((line) => line !== "")
       .join("\n"),
@@ -161,442 +150,6 @@ export async function captureUncommittedWork(
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * What a transfer did, stated rather than inferred.
- *
- * The fields below can be read as if they answered this - `key` empty, `sessions` zero - but each
- * combination is reachable from more than one situation, and the two that matter most ("there was
- * nothing in R2 to restore" and "there was, and the store already had better") look identical in
- * them. One explicit word removes the guesswork from both the log line and the next reader.
- */
-export type SessionTransferOutcome = "wrote" | "restored" | "kept" | "nothing";
-
-/**
- * Put text into a container file, in bounded pieces, and say what happened.
- *
- * WHY NOT THE SDK's `writeFile`. It resolves the default execution SESSION first - `writeFile` ->
- * `resolveExecution` -> `ensureDefaultSession` -> `createSession` through the container's HTTP API -
- * and this runs inside `onStart`, inside `blockConcurrencyWhile`, before any session exists. The
- * measured result of ignoring that: a perfectly good line in R2 and no file in the container, with
- * the exception swallowed into a `console.log` nobody can read. `exec` needs no session, and it
- * returns an exit code, so a failure here is a fact that goes in the log rather than an exception
- * somebody has to notice.
- *
- * The payload is base64 on the command line and decoded in the container, so no quoting rule of the
- * shell can be broken by the text being carried. Returns an empty string on success and a sentence
- * naming the failure otherwise - never throws, because its callers are a boot hook and a shutdown
- * hook and both must finish.
- */
-export async function stageFile(
-  sandbox: Container,
-  path: string,
-  content: string,
-): Promise<string> {
-  const encoded = base64(content);
-  const pieces: string[] = [];
-  for (let i = 0; i < encoded.length; i += SESSION_STAGE_CHUNK_CHARS) {
-    pieces.push(encoded.slice(i, i + SESSION_STAGE_CHUNK_CHARS));
-  }
-  if (pieces.length === 0) pieces.push("");
-
-  for (const [index, piece] of pieces.entries()) {
-    // `>` truncates on the first piece, `>>` appends on the rest; the file is not touched until the
-    // first piece lands, so a payload that dies at piece 7 leaves a truncated file rather than a
-    // half-written one pretending to be whole.
-    const redirect = index === 0 ? ">" : ">>";
-    try {
-      const result = await sandbox.exec(
-        `printf '%s' '${piece}' | base64 -d ${redirect} ${path}`,
-        { signal: AbortSignal.timeout(SESSION_TRANSFER_TIMEOUT_MS) },
-      );
-      if (result.exitCode !== 0) {
-        return `piece ${index + 1}/${pieces.length} of ${path} failed: exit ${result.exitCode}: ${
-          result.stderr.trim() || "no output"
-        }`;
-      }
-    } catch (error) {
-      return `piece ${index + 1}/${pieces.length} of ${path} failed: ${describe(error)}`;
-    }
-  }
-
-  return "";
-}
-
-/**
- * Base64 without the platform's encoding ceremony.
- *
- * `btoa` is Latin-1 only and a session's log can carry any text; `TextEncoder` first is what makes
- * the bytes unambiguous.
- */
-function base64(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-export interface SavedSessions {
-  /** What the transfer did. */
-  outcome: SessionTransferOutcome;
-  /** The R2 key the snapshot was written to, or empty when nothing was written. */
-  key: string;
-  /** Session directories in the snapshot. */
-  sessions: number;
-  /** Size of the tar, in KiB, as measured inside the container. */
-  kib: number;
-  /**
-   * What the store itself looked like: `absent`, `empty`, or `present`.
-   *
-   * The distinction is the whole diagnosis when nothing was captured. "The harness has not written a
-   * conversation yet", "the store is there and empty" and "the capture is looking in the wrong
-   * place" all look like `sessions: 0`, and only the first is benign.
-   */
-  store: string;
-  /** What could not be read, with the reason. */
-  failures: string[];
-}
-
-/**
- * Read the rolling persistence log back out of R2.
- *
- * Best effort in both directions: an unreadable log yields the empty history, which costs the
- * diagnosis and not the capture.
- */
-async function readStatusLog(bucket: R2Bucket): Promise<string[]> {
-  try {
-    const object = await bucket.get(SESSION_STATUS_KEY);
-    if (object === null) return [];
-    const body = await object.text();
-    return body.split("\n").filter((line) => line.trim().length > 0);
-  } catch (error) {
-    console.log(`dsh: could not read the persistence log: ${describe(error)}`);
-    return [];
-  }
-}
-
-/**
- * Record one line about what a persistence hook just did, in the two places it can be seen.
- *
- * The durable copy is what makes the capture visible at all: the container it describes is gone by
- * the time anybody reads it. The local copy is what makes the line visible to the SESSION, which is
- * the only reader that has no API token - `bin/dsh-session` prints the file before the TUI starts.
- *
- * Never throws. The callers run inside `onStart` and inside a shutdown hook, and a diagnostic that
- * can fail a boot or a stop is worse than no diagnostic: this is the log, not the mechanism.
- */
-export async function recordPersistence(
-  sandbox: Container,
-  bucket: R2Bucket,
-  kind: string,
-  detail: string,
-): Promise<void> {
-  const line = `${new Date().toISOString()}  ${kind}  ${detail}`;
-  const history = [...(await readStatusLog(bucket)), line].slice(-SESSION_STATUS_LINES);
-
-  const staged = await stageFile(sandbox, SESSION_STATUS_FILE, `${history.join("\n")}\n`);
-
-  // The durable copy carries the outcome of staging it, because the local copy cannot report that it
-  // is missing - which is the whole reason the first attempt at this was inconclusive.
-  const durable =
-    staged === "" ? history : [...history.slice(0, -1), `${line}  |  ${staged}`];
-
-  try {
-    await bucket.put(SESSION_STATUS_KEY, `${durable.join("\n")}\n`);
-  } catch (error) {
-    console.log(`dsh: could not write the persistence log: ${describe(error)}`);
-  }
-}
-
-/**
- * The container-side half of a capture: choose what to keep, then tar it and base64 it to stdout.
- *
- * WHY IT IS ONE LINE OF `; `-SEPARATED STATEMENTS, AND WHY THAT IS EXACTLY WHAT BROKE IT. The command
- * travels to the container as a single string, so it is written as array elements joined with `; ` -
- * one element per statement. THE JOIN IS NOT FREE: an element that ends in `do` or `then` is followed
- * by a `;`, and `; ` cannot separate those from what follows. `for x in y; do; z; done` is a SYNTAX
- * ERROR, and `if p; then; s; fi` is one too. Measured:
- *
- *     $ sh -c 'for i in a b; do; echo $i; done'
- *     sh: -c: line 0: syntax error near unexpected token `;'
- *     [exit 2]
- *
- * AND A SYNTAX ERROR IN A PERSISTENT SHELL DOES NOT FAIL A COMMAND - IT ENDS THE SHELL. `exec` runs in
- * the container's session shell, not a fresh process, so the capture killed the session it ran in, and
- * the persistence log recorded it for the first time as:
- *
- *     capture  FAILED: could not read the session store: Session 'sandbox-dsh' shell exited (exit code: 2)
- *
- * That is the whole reason no conversation has ever been saved: the capture was the first thing to
- * run this script, and it could not be parsed. So a loop or a conditional must be ONE element, and
- * nothing may end in `do`, `then`, `{` or a backslash.
- *
- * There is no `exit` either, for the same reason the syntax matters: `exit` does not end the script,
- * it ends the SESSION (the SDK says so in its own error text). The script used to `exit 0` on the
- * ordinary "store is empty" path. `set -u` is gone too - an unbound variable would take the shell
- * down - and it does not `cd`, because the working directory is session state as well.
- *
- * AND THE NAME OF WHAT IT ARCHIVES STARTS WITH TWO DASHES. The harness names each project directory
- * after its working directory: `--workspace--`. Passed to `tar` as an operand, GNU and BSD both read
- * that as an option and refuse it ("Option --workspace-- is not supported"). `-C` plus `--` ends the
- * option list; the restore's `mv` carries the same `--`.
- *
- * The count of what it selected, the size in KiB and what the store looked like go to STDERR, which
- * `exec` returns separately, so the payload on stdout stays exactly the base64 text with no framing
- * of ours in it. An empty store writes nothing to stdout and is not an error.
- */
-const SESSION_CAPTURE_SCRIPT = [
-  `store=${SESSION_STORE_DIR}`,
-  'list=""; count=0; kib=0; state=absent',
-  `[ -d "$store" ] && state=empty`,
-  // One element: the loop, with its body, in a single statement - see the header. Newest first,
-  // because `ls -1t` orders by the directory's mtime, which moves when its session is written.
-  `for name in $(ls -1t "$store" 2>/dev/null); do ` +
-    `[ -d "$store/$name" ] || continue; ` +
-    `[ "$count" -lt ${SESSION_SNAPSHOT_MAX_SESSIONS} ] || break; ` +
-    `size=$(du -sk "$store/$name" 2>/dev/null | cut -f1); size=\${size:-0}; ` +
-    // The budget is consulted only from the second session on, so the newest one is never the one
-    // dropped for being large.
-    `if [ "$count" -gt 0 ] && [ $((kib + size)) -gt ${SESSION_SNAPSHOT_MAX_KIB} ]; then break; fi; ` +
-    `kib=$((kib + size)); count=$((count + 1)); list="$list $name"; done`,
-  `if [ "$count" -gt 0 ]; then state=present; fi`,
-  `echo "$count $kib $state" >&2`,
-  `if [ "$count" -gt 0 ]; then tar -cf - -C "$store" -- $list | base64 -w0; fi`,
-].join("; ");
-
-/**
- * The container-side half of a restore: decode into a staging directory, then move it into place.
- *
- * Nothing reaches the store until the whole archive has decoded - `&&` stops the chain at the first
- * failure - so a half-transfer cannot masquerade as "this container already has sessions".
- *
- * `mv -n -- {}` rather than `mv -n {}`, and the `--` is load-bearing: what is being moved out of the
- * staging directory is a project directory called `--workspace--`, and both GNU and BSD `mv` read a
- * leading-dash operand as an option ("illegal option -- -", exit 64). The `&&` chain would then stop
- * there, having decoded the archive and moved nothing, and the restore would report a failure it
- * could not name.
- */
-const SESSION_RESTORE_SCRIPT = [
-  `rm -rf ${SESSION_RESTORE_STAGE_DIR}`,
-  `mkdir -p ${SESSION_RESTORE_STAGE_DIR}`,
-  `base64 -d ${SESSION_SNAPSHOT_FILE} | tar -xf - -C ${SESSION_RESTORE_STAGE_DIR}`,
-  `mkdir -p ${SESSION_STORE_DIR}`,
-  `find ${SESSION_RESTORE_STAGE_DIR} -mindepth 1 -maxdepth 1 -exec mv -n -- {} ${SESSION_STORE_DIR}/ \\;`,
-  `rm -rf ${SESSION_RESTORE_STAGE_DIR} ${SESSION_SNAPSHOT_FILE}`,
-].join(" && ");
-
-/** How many session directories the container currently holds. */
-const SESSION_COUNT_SCRIPT =
-  `find ${SESSION_STORE_DIR} -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l`;
-
-/**
- * Copy the harness's session store out of the container into R2.
- *
- * IDEMPOTENT, BECAUSE OF THE KEY RATHER THAN BECAUSE OF A CHECK. The snapshot is a whole-store tar
- * at one key, so capture is a pure function of the store: running it twice writes the same bytes
- * twice, and a capture that arrives after another has overwritten it with the newer store. Nothing
- * is appended, nothing is timestamped, and there is no half of a previous capture to reconcile.
- * `onActivityExpired` and `onStop` both fire on an ordinary sleep, and both calling this is fine.
- *
- * IT REFUSES TO WRITE AN EMPTY SNAPSHOT. A container with no sessions is either brand new or one
- * whose restore failed, and in both cases overwriting the durable copy with nothing would destroy
- * the only copy of the conversations. Nothing to capture means nothing is written.
- *
- * Never throws: it runs while the container is being stopped.
- */
-export async function captureSessions(
-  sandbox: Container,
-  bucket: R2Bucket,
-  stamp: string,
-): Promise<SavedSessions> {
-  const result = await captureSessionsInternal(sandbox, bucket, stamp);
-  await recordPersistence(sandbox, bucket, "capture", describeCapture(result));
-  return result;
-}
-
-/**
- * What the capture did, in one line, for the log the NEXT boot reads back.
- *
- * Three failures look identical from the outside - nothing to save, a save that failed, and a save
- * that worked - so the line names which one happened, and the "nothing" case says what the store
- * actually looked like rather than merely that it held nothing.
- */
-function describeCapture(result: SavedSessions): string {
-  if (result.failures.length > 0) return `FAILED: ${result.failures.join("; ")}`;
-  if (result.outcome !== "wrote") return `nothing to save: the store is ${result.store}`;
-  return `saved ${result.sessions} store entr${result.sessions === 1 ? "y" : "ies"}, ` +
-    `${result.kib} KiB to ${result.key}`;
-}
-
-async function captureSessionsInternal(
-  sandbox: Container,
-  bucket: R2Bucket,
-  stamp: string,
-): Promise<SavedSessions> {
-  const result: SavedSessions = {
-    outcome: "nothing",
-    key: "",
-    sessions: 0,
-    kib: 0,
-    store: "unknown",
-    failures: [],
-  };
-
-  let output: { stdout: string; stderr: string; exitCode: number };
-  try {
-    output = await sandbox.exec(SESSION_CAPTURE_SCRIPT, {
-      signal: AbortSignal.timeout(SESSION_TRANSFER_TIMEOUT_MS),
-    });
-  } catch (error) {
-    result.failures.push(`could not read the session store: ${describe(error)}`);
-    return result;
-  }
-
-  const counted = /(\d+)\s+(\d+)\s+(\S+)/.exec(output.stderr);
-  result.sessions = counted ? Number(counted[1]) : 0;
-  result.kib = counted ? Number(counted[2]) : 0;
-  result.store = counted ? counted[3] : `unreadable (${output.stderr.trim() || "no output"})`;
-
-  if (result.sessions === 0) {
-    // Not a failure and not a write: see "refuses to write an empty snapshot" above.
-    return result;
-  }
-  if (output.exitCode !== 0) {
-    result.sessions = 0;
-    result.failures.push(`tar of the session store exited ${output.exitCode}: ${output.stderr.trim()}`);
-    return result;
-  }
-
-  try {
-    await bucket.put(SESSION_SNAPSHOT_KEY, output.stdout);
-    await bucket.put(
-      SESSION_SNAPSHOT_MANIFEST_KEY,
-      [
-        `The dsh session store, snapshotted from the container at ${stamp}.`,
-        ``,
-        `Sessions: ${result.sessions} (newest first, capped at ${SESSION_SNAPSHOT_MAX_SESSIONS} or`,
-        `${SESSION_SNAPSHOT_MAX_KIB} KiB of files, whichever comes first).`,
-        `Tar size: ${result.kib} KiB. Base64 payload: ${output.stdout.length} bytes.`,
-        ``,
-        `Restored automatically on the next container start, but only into an EMPTY store:`,
-        `a container that already has sessions keeps them, because they are newer than this.`,
-        ``,
-        `To read it by hand: base64 -d sessions.tar.b64 | tar -tf -`,
-      ].join("\n"),
-    );
-    result.key = SESSION_SNAPSHOT_KEY;
-    result.outcome = "wrote";
-  } catch (error) {
-    result.failures.push(`could not write the snapshot to R2: ${describe(error)}`);
-  }
-
-  return result;
-}
-
-/**
- * Put the last snapshot back into a container that has no sessions of its own.
- *
- * THE RULE: RESTORE ONLY INTO AN EMPTY STORE. If the container already holds a single session
- * directory, the snapshot is older than what is on disk - the disk is only non-empty when the
- * container did not restart, or when it restarted and something has already written a conversation
- * - and unpacking an older copy over newer state is the one outcome worth refusing. The check is
- * the first thing this does, and it is the only reason the store is ever skipped.
- *
- * Never throws: it runs inside `onStart`, and a container that cannot be used because a restore
- * failed would trade a missing conversation for a missing workspace.
- */
-export async function restoreSessions(
-  sandbox: Container,
-  bucket: R2Bucket,
-): Promise<SavedSessions> {
-  const result = await restoreSessionsInternal(sandbox, bucket);
-  await recordPersistence(sandbox, bucket, "restore", describeRestore(result));
-  return result;
-}
-
-/**
- * What the restore did, in one line. Restoring, keeping what is already there, and having nothing to
- * restore are three different situations that all end in "the session is not in the list", so the
- * log has to say which one happened.
- */
-function describeRestore(result: SavedSessions): string {
-  if (result.failures.length > 0) return `FAILED: ${result.failures.join("; ")}`;
-  if (result.outcome === "nothing") return "no snapshot in R2: this container starts with nothing to restore";
-  if (result.outcome === "kept") {
-    return `kept the ${result.sessions} conversation directories already on disk`;
-  }
-  return `restored ${result.sessions} conversation director${result.sessions === 1 ? "y" : "ies"}`;
-}
-
-async function restoreSessionsInternal(
-  sandbox: Container,
-  bucket: R2Bucket,
-): Promise<SavedSessions> {
-  const result: SavedSessions = {
-    outcome: "nothing",
-    key: SESSION_SNAPSHOT_KEY,
-    sessions: 0,
-    kib: 0,
-    // A restore is not a capture: the store's own shape is the capture's question, and this records
-    // only whether the snapshot was there.
-    store: "unknown",
-    failures: [],
-  };
-
-  let snapshot: R2ObjectBody | null;
-  try {
-    snapshot = await bucket.get(SESSION_SNAPSHOT_KEY);
-  } catch (error) {
-    result.failures.push(`could not read the snapshot from R2: ${describe(error)}`);
-    return result;
-  }
-  if (snapshot === null) {
-    // A first-ever start. Nothing to restore is not a failure.
-    return result;
-  }
-
-  try {
-    const existing = await sandbox.exec(SESSION_COUNT_SCRIPT, {
-      signal: AbortSignal.timeout(SESSION_TRANSFER_TIMEOUT_MS),
-    });
-    const onDisk = Number(existing.stdout.trim());
-    if (onDisk > 0) {
-      result.key = "";
-      result.sessions = onDisk;
-      result.outcome = "kept";
-      return result;
-    }
-
-    const payload = await snapshot.text();
-    // The same route the log takes, and for the same reason: `writeFile` needs a session, and this
-    // runs before any exists. A failure here is reported rather than thrown, so it reaches the log.
-    const staged = await stageFile(sandbox, SESSION_SNAPSHOT_FILE, payload);
-    if (staged !== "") {
-      result.failures.push(staged);
-      return result;
-    }
-
-    const restored = await sandbox.exec(SESSION_RESTORE_SCRIPT, {
-      signal: AbortSignal.timeout(SESSION_TRANSFER_TIMEOUT_MS),
-    });
-    if (restored.exitCode !== 0) {
-      result.failures.push(
-        `restore exited ${restored.exitCode}: ${restored.stderr.trim() || "no output"}`,
-      );
-      return result;
-    }
-
-    const after = await sandbox.exec(SESSION_COUNT_SCRIPT, {
-      signal: AbortSignal.timeout(SESSION_TRANSFER_TIMEOUT_MS),
-    });
-    result.sessions = Number(after.stdout.trim());
-    result.outcome = "restored";
-  } catch (error) {
-    result.failures.push(`could not restore the session store: ${describe(error)}`);
-  }
-
-  return result;
 }
 
 /**
@@ -612,45 +165,14 @@ async function restoreSessionsInternal(
  */
 export class Sandbox extends BaseSandbox<Env> {
   /**
-   * The container is up. This is the first moment its disk can be written, and the only moment a
-   * restore can run before anything reads the store.
-   *
-   * `super.onStart()` FIRST, and it is not a formality: the SDK's own `onStart` is what marks the
-   * runtime started and reconciles tunnel storage, and skipping it makes the container look
-   * unstarted to every later call. The restore follows, and only into an empty store.
-   *
-   * The container's startup is gated on this method returning (`blockConcurrencyWhile` in
-   * containers/dist/lib/container.js), so a slow restore delays the first request rather than
-   * racing it - and `restoreSessions` carries its own timeout so "slow" cannot become "never".
-   */
-  override async onStart(): Promise<void> {
-    await super.onStart();
-    // Written BEFORE the restore, and deliberately: this line is what separates "the hook never ran"
-    // from "the hook ran and the restore could not write anything", and those two look identical
-    // from the session - which is the only place either of them is visible.
-    await recordPersistence(
-      this.asContainer(),
-      this.env.STATE,
-      "boot",
-      "container started; restoring the conversation store",
-    );
-    await this.restoreSessionStore();
-  }
-
-  /**
    * The sleep timer expired and nothing is connected. The platform is about to stop the container, so
    * this is the last moment the working tree can be read.
+   *
+   * THERE IS NO `onStart` HERE ANY MORE. It existed to put the conversation store back before
+   * anything read it, and it did not do that - see the file header. Restoring is now a mount, made
+   * from the terminal route before the PTY opens, which needs no hook and cannot be skipped.
    */
   override async onActivityExpired(): Promise<void> {
-    // Before the save, not after: this line is the difference between "the sleep hook never ran" and
-    // "the sleep hook ran and the save failed", and by the time anybody can look, the container that
-    // would answer is gone.
-    await recordPersistence(
-      this.asContainer(),
-      this.env.STATE,
-      "stop",
-      "the sleep timer expired; saving the conversation before the container is stopped",
-    );
     await this.saveWorkThenStop();
   }
 
@@ -659,12 +181,6 @@ export class Sandbox extends BaseSandbox<Env> {
    * covers a shutdown the sleep timer did not initiate.
    */
   override async onStop(params: StopParams): Promise<void> {
-    await recordPersistence(
-      this.asContainer(),
-      this.env.STATE,
-      "stop",
-      "the container process is exiting; saving the conversation first",
-    );
     await this.saveWork();
     await super.onStop(params);
   }
@@ -676,7 +192,6 @@ export class Sandbox extends BaseSandbox<Env> {
 
   async saveWork(): Promise<void> {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    await this.captureSessionStore(stamp);
 
     try {
       const captured = await captureUncommittedWork(this.asContainer(), this.env.STATE, stamp);
@@ -696,44 +211,7 @@ export class Sandbox extends BaseSandbox<Env> {
   }
 
   /**
-   * The conversation, captured on the same two hooks as the working tree.
-   *
-   * Its failures are logged exactly like the working tree's and for the same reason: this runs at
-   * shutdown, and an exception here must not turn a clean stop into an error path.
-   */
-  async captureSessionStore(stamp: string): Promise<void> {
-    try {
-      const captured = await captureSessions(this.asContainer(), this.env.STATE, stamp);
-      if (captured.outcome === "wrote") {
-        console.log(
-          `dsh: saved ${captured.sessions} session(s) (${captured.kib} KiB) to ${captured.key}`,
-        );
-      }
-      for (const failure of captured.failures) {
-        console.log(`dsh: could not capture sessions: ${failure}`);
-      }
-    } catch (error) {
-      console.log(`dsh: session capture failed: ${describe(error)}`);
-    }
-  }
-
-  /** The conversation, put back on start. Never fatal, for the reason given on restoreSessions. */
-  async restoreSessionStore(): Promise<void> {
-    try {
-      const restored = await restoreSessions(this.asContainer(), this.env.STATE);
-      if (restored.outcome === "restored") {
-        console.log(`dsh: restored ${restored.sessions} session(s) from ${SESSION_SNAPSHOT_KEY}`);
-      }
-      for (const failure of restored.failures) {
-        console.log(`dsh: could not restore sessions: ${failure}`);
-      }
-    } catch (error) {
-      console.log(`dsh: session restore failed: ${describe(error)}`);
-    }
-  }
-
-  /**
-   * This object as the container interface the capture and restore functions take.
+   * This object as the container interface the capture functions take.
    *
    * The cast is the SDK's, not ours: the base class installs `exec` on the instance at runtime but
    * the 0.12.9 `Sandbox` type does not declare the file and command methods on the class (they are
