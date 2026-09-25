@@ -103,8 +103,13 @@ child.stdout.on("data", (chunk) => {
     if (frame.id !== undefined && pending.has(frame.id)) {
       const { resolve, reject, method } = pending.get(frame.id);
       pending.delete(frame.id);
-      if (frame.error) reject(new Error(`${method}: ${frame.error.message}`));
-      else resolve(frame.result);
+      if (frame.error) {
+        // The ACP error's `data` is where the harness puts the real reason - a stack, a provider
+        // name, a path. Reporting the bare `message` is what turned a container-side failure into
+        // the single word "Internal error" and cost a round trip through the Worker to even see it.
+        const detail = frame.error.data === undefined ? "" : ` ${JSON.stringify(frame.error.data)}`;
+        reject(new Error(`${method}: ${frame.error.message}${detail}`));
+      } else resolve(frame.result);
       continue;
     }
     const update = frame?.params?.update;
