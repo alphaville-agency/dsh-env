@@ -345,6 +345,27 @@ function describeError(error: unknown): string {
  * symptom is specifically the settings/credential half of the environment. Naming all three here
  * makes the route independent of what the exec environment happens to carry.
  */
+/**
+ * A prompt as a base64 payload, so it can travel on a command line without being code.
+ *
+ * WHY NOT `sandbox.writeFile`, WHICH IS WHAT THIS REPLACED. Measured with `wrangler tail` against the
+ * live Worker: `RPC writeFile` came back `outcome=canceled` at 69s and the `exec` that depended on it
+ * never ran at all - so the route stalled before the model was ever asked anything. A file API call
+ * that does not return is a worse foundation for a control surface than a shell command that is
+ * provably inert.
+ *
+ * base64 is `[A-Za-z0-9+/=]`, so the payload has no quote, no `$`, no backtick and no backslash: it
+ * cannot break out of the single quotes it is wrapped in, and it cannot be interpreted as anything.
+ * The prompt becomes data on a command line rather than syntax on one, which is the property the
+ * previous `JSON.stringify` interpolation did not have.
+ */
+function toBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 function agentEnv(env: Env): Record<string, string> {
   const values: Record<string, string> = {
     HOME: "/root",
@@ -381,9 +402,9 @@ async function agent(sandbox: Sandbox, request: Request, env: Env): Promise<Resp
   // backticks executed in the container - on a route that exists precisely so no request field can
   // reach argv. Writing it to a fixed path and letting the script read it removes the shell from the
   // path entirely: the only thing interpolated here is a constant.
-  await sandbox.writeFile(AGENT_PROMPT_PATH, prompt);
   const result = await sandbox.exec(
-    `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
+    `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
+      `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
       `node /usr/local/bin/agent-ask`,
     { timeout: ROUTE_AGENT_TIMEOUT_MS, env: agentEnv(env) },
   );
@@ -452,9 +473,6 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
     }
 
     send({ type: "started" });
-    // Same reason as the POST route: the prompt goes to a file so nothing request-derived is ever
-    // placed on a command line.
-    await sandbox.writeFile(AGENT_PROMPT_PATH, prompt);
     let partial = "";
     // Each container stdout line is one JSON frame from `agent-ask`, forwarded as its own socket
     // message. A chunk boundary can split a line, so the remainder is kept until its newline lands.
@@ -470,7 +488,8 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
 
     try {
       const result = await sandbox.exec(
-        `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
+        `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
+          `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
           `AGENT_ASK_STREAM=1 node /usr/local/bin/agent-ask`,
         {
           timeout: ROUTE_AGENT_TIMEOUT_MS,
