@@ -499,6 +499,15 @@ export class Sandbox extends BaseSandbox<Env> {
    */
   override async onStart(): Promise<void> {
     await super.onStart();
+    // Written BEFORE the restore, and deliberately: this line is what separates "the hook never ran"
+    // from "the hook ran and the restore could not write anything", and those two look identical
+    // from the session - which is the only place either of them is visible.
+    await recordPersistence(
+      this.asContainer(),
+      this.env.STATE,
+      "boot",
+      "container started; restoring the conversation store",
+    );
     await this.restoreSessionStore();
   }
 

@@ -55,6 +55,23 @@ export const ROUTE_TERMINAL = "/ws/terminal";
 export const ROUTE_ROOT = "/";
 
 /**
+ * The persistence log, read back out of R2.
+ *
+ * WHY THIS IS A ROUTE AND NOT JUST A LOG. The two halves of this mechanism run where nobody can see
+ * them: the capture runs as a container is being discarded, so it leaves nothing behind, and the
+ * restore runs inside `onStart`, before any session exists to report it. Cloudflare keeps the
+ * Worker's `console.log` only for a window and only for a caller holding an API token. So a
+ * conversation that does not come back is indistinguishable from a store that was never written,
+ * and the operator's report is "it is gone again" with no way to say which.
+ *
+ * This is READ-ONLY and it does NOT touch the sandbox: reading it must never wake a stopped
+ * container, because a status check that costs money and resets the sleep timer is a check nobody
+ * can afford to run. It answers two questions the session cannot - whether a snapshot exists at all,
+ * and what the last hooks thought they did.
+ */
+export const ROUTE_PERSISTENCE = "/persistence";
+
+/**
  * What the terminal runs, and there is deliberately no way to ask for anything else.
  *
  * The terminal attaches to a STABLE session - that is what makes a reconnect replay the scrollback
@@ -213,3 +230,11 @@ export const ROUTE_FIELD = "route";
 export const METHOD_FIELD = "method";
 export const DESCRIPTION_FIELD = "description";
 export const ERROR_FIELD = "error";
+
+/** The persistence report's own field names; see `persistence` in src/worker.ts. */
+export const SNAPSHOT_FIELD = "snapshot";
+export const LOG_FIELD = "log";
+export const KEY_FIELD = "key";
+export const SIZE_FIELD = "size";
+export const UPLOADED_FIELD = "uploaded";
+export const NOTE_FIELD = "note";

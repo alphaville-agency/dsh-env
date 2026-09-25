@@ -35,20 +35,29 @@ import {
   DESCRIPTION_FIELD,
   ERROR_FIELD,
   GH_TOKEN_ENV,
+  KEY_FIELD,
+  LOG_FIELD,
   METHOD_FIELD,
   METHOD_GET,
   MODEL_KEY_ENV,
+  NOTE_FIELD,
   OK_FIELD,
   ROUTES_FIELD,
   ROUTE_FIELD,
   ROUTE_HEALTHZ,
+  ROUTE_PERSISTENCE,
   ROUTE_ROOT,
   ROUTE_TERMINAL,
   SANDBOX_ID,
   SERVICE_FIELD,
   SERVICE_NAME,
+  SIZE_FIELD,
   SLEEP_AFTER,
+  SNAPSHOT_FIELD,
+  SESSION_SNAPSHOT_KEY,
+  SESSION_STATUS_KEY,
   TERMINAL_SHELL,
+  UPLOADED_FIELD,
   WEBSOCKET_UPGRADE,
 } from "./names";
 import { getSandbox, type SandboxOptions } from "@cloudflare/sandbox";
@@ -180,8 +189,36 @@ function describe(): Response {
     [ROUTES_FIELD]: [
       { [ROUTE_FIELD]: ROUTE_ROOT, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "this description" },
       { [ROUTE_FIELD]: ROUTE_HEALTHZ, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "liveness; does not wake the sandbox" },
+      { [ROUTE_FIELD]: ROUTE_PERSISTENCE, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "what the persistence hooks did, and whether a snapshot exists; does not wake the sandbox" },
       { [ROUTE_FIELD]: ROUTE_TERMINAL, [METHOD_FIELD]: METHOD_GET, [DESCRIPTION_FIELD]: "interactive terminal; needs a WebSocket upgrade" },
     ],
+  });
+}
+
+/**
+ * What the persistence hooks have done, and whether there is a snapshot to restore from.
+ *
+ * Read-only, R2 only, and deliberately incapable of starting the container: the question it answers
+ * ("is the conversation store actually being saved?") is asked most often right after the container
+ * has stopped, which is exactly when waking it would destroy the evidence.
+ */
+async function persistence(env: Env): Promise<Response> {
+  const snapshot = await env.STATE.head(SESSION_SNAPSHOT_KEY);
+  const log = await env.STATE.get(SESSION_STATUS_KEY);
+
+  return Response.json({
+    [SNAPSHOT_FIELD]: snapshot === null
+      ? null
+      : {
+          [KEY_FIELD]: SESSION_SNAPSHOT_KEY,
+          [SIZE_FIELD]: snapshot.size,
+          [UPLOADED_FIELD]: snapshot.uploaded.toISOString(),
+        },
+    [LOG_FIELD]: log === null ? [] : (await log.text()).split("\n").filter((line) => line !== ""),
+    [NOTE_FIELD]:
+      "A capture line means the hook ran as a container was stopped; a restore line means the next " +
+      "boot read it. No line at all means the hook never ran, which is a different fault from a " +
+      "capture that failed.",
   });
 }
 
@@ -204,6 +241,9 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === METHOD_GET && url.pathname === ROUTE_HEALTHZ) return health();
+    if (request.method === METHOD_GET && url.pathname === ROUTE_PERSISTENCE) {
+      return await persistence(env);
+    }
 
     if (request.method === METHOD_GET && url.pathname === ROUTE_ROOT) return describe();
     if (url.pathname === ROUTE_TERMINAL) return await terminal(request, env);
