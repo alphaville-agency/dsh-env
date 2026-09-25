@@ -33,11 +33,28 @@ ENV DEBIAN_FRONTEND=noninteractive
 # every downloaded .deb in /var/cache/apt/archives - and removing them in a LATER layer would not
 # help at all, because Docker layers are additive and the bytes stay in the layer that fetched them.
 # The purge is therefore in the same RUN as the install. tests/dockerfile.test.mjs pins this.
+# THE WORKSPACE TOOLCHAIN, NOT A SHELLED-OUT ONE. The comment above says these "come back with the
+# layer that can be verified to use it" - and that layer is here: the capability repository declares
+# `requires-python = ">=3.12"` and its own toolchain (names/validate.py, the test suite) is python,
+# so the agency cannot run its own repo without it. The rest are the shell the work happens in:
+# tmux and less for sessions, ripgrep for search, make for builds, gnupg for signed commits.
+#
+# All in ONE RUN with the clean, because the base image keeps every .deb in /var/cache/apt/archives
+# and Docker layers are additive - removing them in a later layer would not reclaim those bytes.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git curl jq ca-certificates \
+      tmux ripgrep less make python3 gnupg \
  && apt-get clean \
  && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+
+# Every one of them must be present when the image is built. A package nobody exercises is a package
+# nobody has proved is installed - and the brief path above was exactly that failure in reverse:
+# python3 was absent, and the missing interpreter failed silently behind `|| true`.
+RUN for t in tmux rg less make python3 gpg gh git; do \
+        command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 1; }; \
+    done \
+ && python3 --version
 
 # The harness, which is the entire point of this environment: without it the container is a shell in
 # the cloud rather than a place to work.
