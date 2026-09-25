@@ -358,6 +358,17 @@ export async function restoreSessions(
   return result;
 }
 
+/**
+ * Nothing in this class is `private`, deliberately.
+ *
+ * A `private` member makes a class NOMINAL in TypeScript, so this subclass stops being structurally
+ * assignable to the SDK's `Sandbox<any>` - and the failure surfaces somewhere unrelated: the Worker
+ * cannot pass `DurableObjectNamespace<Sandbox>` to `getSandbox`, reporting instead that our type is
+ * "missing" the very methods this file defines. That is a confusing error for a one-word cause.
+ *
+ * `protected` is fine where the method is genuinely internal; the helpers below are simply not
+ * marked, which keeps the class structural.
+ */
 export class Sandbox extends BaseSandbox<Env> {
   /**
    * The container is up. This is the first moment its disk can be written, and the only moment a
@@ -393,17 +404,17 @@ export class Sandbox extends BaseSandbox<Env> {
     await super.onStop(params);
   }
 
-  private async saveWorkThenStop(): Promise<void> {
+  async saveWorkThenStop(): Promise<void> {
     await this.saveWork();
     await this.stop();
   }
 
-  private async saveWork(): Promise<void> {
+  async saveWork(): Promise<void> {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     await this.captureSessionStore(stamp);
 
     try {
-      const captured = await captureUncommittedWork(this.container(), this.env.STATE, stamp);
+      const captured = await captureUncommittedWork(this.asContainer(), this.env.STATE, stamp);
       if (captured.repos.length > 0) {
         console.log(
           `dsh: saved uncommitted work to ${captured.prefix} for ${captured.repos.join(", ")}`,
@@ -425,9 +436,9 @@ export class Sandbox extends BaseSandbox<Env> {
    * Its failures are logged exactly like the working tree's and for the same reason: this runs at
    * shutdown, and an exception here must not turn a clean stop into an error path.
    */
-  private async captureSessionStore(stamp: string): Promise<void> {
+  async captureSessionStore(stamp: string): Promise<void> {
     try {
-      const captured = await captureSessions(this.container(), this.env.STATE, stamp);
+      const captured = await captureSessions(this.asContainer(), this.env.STATE, stamp);
       if (captured.key !== "") {
         console.log(
           `dsh: saved ${captured.sessions} session(s) (${captured.kib} KiB) to ${captured.key}`,
@@ -442,9 +453,9 @@ export class Sandbox extends BaseSandbox<Env> {
   }
 
   /** The conversation, put back on start. Never fatal, for the reason given on restoreSessions. */
-  private async restoreSessionStore(): Promise<void> {
+  async restoreSessionStore(): Promise<void> {
     try {
-      const restored = await restoreSessions(this.container(), this.env.STATE);
+      const restored = await restoreSessions(this.asContainer(), this.env.STATE);
       if (restored.key !== "") {
         console.log(`dsh: restored ${restored.sessions} session(s) from ${SESSION_SNAPSHOT_KEY}`);
       }
@@ -464,7 +475,7 @@ export class Sandbox extends BaseSandbox<Env> {
    * declared on `ISandbox` and on the proxy facade). The shape in `Container` above is what these
    * functions actually use, so the cast claims nothing beyond it.
    */
-  private container(): Container {
+  protected asContainer(): Container {
     return this as unknown as Container;
   }
 }
