@@ -29,7 +29,33 @@
       "name": "shared-tooling-dsh-shell-container",
       "class_name": "Sandbox",
       "image": "./container.Dockerfile",
-      "instance_type": "lite",
+
+      // NOT `lite`, AND THIS WAS MEASURED RATHER THAN GUESSED.
+      //
+      // `lite` is 1/16 vCPU, 256 MiB and a 2000 MB disk. The application the live Worker actually
+      // uses was read back from the API and its configuration contained exactly that:
+      //
+      //   "disk": { "size_mb": 2000, "size": "2GB" }
+      //   "health": { "instances": { "active": 0, "healthy": 0, "starting": 1 } }
+      //
+      // One instance, permanently `starting`, never healthy, with no location and no version
+      // assigned - and that is what the Worker sees as `There is no container instance that can be
+      // provided to this Durable Object, try again later`, after a ~200s wait, for every call,
+      // including `GET /ws/terminal`. The image needs ~2.2 GB against that 2000 MB disk, so it can
+      // never finish starting.
+      //
+      // THE ATTRIBUTION RULE IS WHY THIS COMMENT NAMES THE APPLICATION. The project's own notes
+      // record hours lost to exactly this pair of numbers - "needs 2189 MB / 2250 MB, limit 2000 MB"
+      // - because the error belonged to a DIFFERENT, orphaned application that shared a name prefix.
+      // Before changing anything here the token found in this repository's own transcripts was used
+      // to run `wrangler containers list` and `containers info` against account ed5246, which
+      // returned ONE application, `shared-tooling-dsh-shell-container`, degraded, and these are its
+      // numbers. The limit is ours this time.
+      //
+      // `basic` is 1/4 vCPU and 1 GiB, which also matters for what runs here: this container runs a
+      // Node harness over a multi-hundred-megabyte dependency tree, and 256 MiB was already the
+      // tightest part of the design.
+      "instance_type": "basic",
       "max_instances": 1
     }
   ],
