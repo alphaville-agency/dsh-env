@@ -1,10 +1,20 @@
 #!/usr/bin/env node
 // One prompt over ACP, one reply on stdout — the bounded thing POST /agent runs.
 //
+// WHY RESUME AND NOT `session/new`. Each call boots its own `dsh --profile acp` process, so the
+// handshake is cheap but a fresh session pays full composition on every request; measured cold, that
+// was a client-side 150 s timeout before a single token moved. A session that is already persisted
+// RESUMES instead: measured on this machine, `session/resume` answers in 708 ms against a
+// `session/new` that could not be timed at all, because resume skips composition and restores the
+// log rather than rebuilding it. The reply then arrives in a normal model turn — 5.4 s for a
+// one-line answer. So the sessionId is kept on disk (one file, the whole argument) and reused until
+// the server says it is gone, at which point falling back to `session/new` is the correct thing
+// rather than a failure.
+//
 // WHY NOT A FLAG ON `dsh --profile acp`. That profile SERVES until the client disconnects; there is
 // no --ask, and there cannot be one, because the protocol is a conversation: initialize, then
-// session/new, then session/prompt, each answering before the next makes sense. So the three calls
-// live here, in the shape the ACP README documents, and this script ends on `end_turn`.
+// resume-or-new, then session/prompt, each answering before the next makes sense. So the calls live
+// here, in the shape the ACP README documents, and this script ends on `end_turn`.
 //
 // STDOUT IS ONLY THE REPLY. The Worker parses this line and nothing else, so a stray log on stdout
 // would be read as an answer — which is why everything diagnostic goes to stderr.
@@ -12,8 +22,11 @@
 //   node agent-ask.mjs "the prompt"
 //
 // Exits 0 with the reply, non-zero with the reason on stderr. No retry loop: a failed call is a
-// result to report, not something to paper over by asking twice.
+// result to report, not something to paper over by asking twice. The one exception is a stale
+// sessionId — resuming a session the server no longer has is not a failure of the prompt, so that
+// single case falls back to a fresh session, once.
 import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 
 const prompt = process.argv.slice(2).join(" ").trim();
 if (!prompt) {
@@ -22,9 +35,24 @@ if (!prompt) {
 }
 // Bounded, because this runs inside an HTTP request that already has a deadline.
 const DEADLINE_MS = Number(process.env.AGENT_ASK_TIMEOUT_MS ?? 110_000);
+const cwd = process.env.AGENT_CWD ?? process.cwd();
+// One file is the whole of the client-side state: the id of the session to resume next time. It
+// lives beside the sessions it names so it is on the same store, and a container whose disk was
+// cleared simply finds nothing there and makes a new session — which is the intended reset.
+const SESSION_FILE = process.env.AGENT_SESSION_FILE ?? `${cwd}/.acp-agent-session`;
+
+const readSavedSession = () => {
+  try { return readFileSync(SESSION_FILE, "utf8").trim() || null; } catch { return null; }
+};
+const saveSession = (id) => {
+  try { writeFileSync(SESSION_FILE, id + "\n"); } catch { /* unwritable is not fatal: next call makes a new session */ }
+};
+const forgetSession = () => {
+  try { unlinkSync(SESSION_FILE); } catch { /* absent is the state we wanted */ }
+};
 
 const child = spawn("dsh", ["--profile", process.env.AGENT_PROFILE ?? "acp"], {
-  cwd: process.env.AGENT_CWD ?? process.cwd(),
+  cwd,
   stdio: ["pipe", "pipe", "inherit"],   // stderr inherits: diagnostics never touch stdout
 });
 
@@ -94,17 +122,37 @@ const watchdog = setInterval(() => {
   }
 }, 2000);
 
+/**
+ * Resume the saved session, or make one.
+ *
+ * A resume that is rejected — the session was deleted, or its cwd moved — is a stale id, not a
+ * broken prompt, so the id is dropped and a fresh session takes its place. Everything else is left
+ * alone: a resume refused for any other reason is reported, because guessing would hide it.
+ */
+async function openSession() {
+  const saved = readSavedSession();
+  if (saved) {
+    try {
+      await send("session/resume", { sessionId: saved, cwd, mcpServers: [] });
+      process.stderr.write(`[resumed ${saved}]\n`);
+      return saved;
+    } catch (e) {
+      process.stderr.write(`[resume of ${saved} refused: ${e.message}; making a new session]\n`);
+      forgetSession();
+    }
+  }
+  const created = await send("session/new", { cwd, mcpServers: [] });
+  saveSession(created.sessionId);
+  process.stderr.write(`[session ${created.sessionId}]\n`);
+  return created.sessionId;
+}
+
 try {
   await send("initialize", {
     protocolVersion: 1,
     clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
   });
-  const created = await send("session/new", {
-    cwd: process.env.AGENT_CWD ?? process.cwd(),
-    mcpServers: [],
-  });
-  sessionId = created.sessionId;
-  process.stderr.write(`[session ${sessionId}]\n`);
+  sessionId = await openSession();
   const result = await send("session/prompt", {
     sessionId,
     prompt: [{ type: "text", text: prompt }],
