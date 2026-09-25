@@ -135,7 +135,7 @@ function sandboxFor(env: Env): Sandbox {
  * This is the join between the two halves of the design. The credential lives in a Worker SECRET -
  * never in the image, never in this repository, never in the profile's settings, which name the
  * environment variable rather than carrying its value. `settings.yaml` says
- * `apiKeyEnv: CHEAPINFERENCE_COM_API_KEY`, so the container has to have that variable set or the
+ * `apiKeyEnv: CF_AI_GATEWAY_TOKEN`, so the container has to have that variable set or the
  * harness starts and then cannot reach a model at all.
  *
  * The SDK has no `envVars` option on `getSandbox`; `setEnvVars` is the API, so this runs before each
@@ -230,21 +230,39 @@ async function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promi
  * the path is mounted, there is nothing to do and nothing to re-do.
  */
 async function ensureStateMounted(sandbox: Sandbox): Promise<string> {
+  const started = Date.now();
   const probe = await sandbox.exec(
     `mountpoint -q ${STATE_MOUNT_PATH} && echo ${MOUNTED} || echo not-mounted`,
   );
-  console.log(`dsh: state mount probe: ${probe.stdout.trim() || probe.stderr.trim()}`);
+  console.log(
+    `dsh: state mount probe answered in ${Date.now() - started}ms: ` +
+      `${probe.stdout.trim() || probe.stderr.trim()}`,
+  );
   if (probe.stdout.includes(MOUNTED)) return "already mounted";
 
   console.log(`dsh: mounting ${STATE_BINDING} at ${STATE_MOUNT_PATH}`);
-  const mount = () => sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {});
+  const mount = () => withTimeout(
+    sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {}),
+    STATE_MOUNT_TIMEOUT_MS,
+    "mountBucket",
+  );
   try {
     await mount();
   } catch (first) {
-    // The SDK may still hold a mount record for a container that is gone, and it refuses a second
-    // mount at a path it believes is in use. Clearing that record is what lets the retry reach s3fs
-    // at all; the unmount of a mount that is not there is itself an error, and not an interesting
+    // THE RETRY IS THE WHOLE POINT, AND REMOVING IT COST THE STORE.
+    //
+    // The SDK may still hold a mount record for a container that is gone - `activeMounts` lives in
+    // the Durable Object's memory, which outlives the container it describes - and it refuses a
+    // second mount at a path it believes is in use. Clearing that record is what lets the retry reach
+    // s3fs at all. An unmount of a mount that is not there is itself an error and not an interesting
     // one, because the mount below is the thing being attempted.
+    //
+    // This was deleted in commit d8682e9 ("Bound the state mount") in favour of a bare rethrow, and
+    // the effect was measured today: the container booted with
+    // `[the session store is NOT backed by R2: /mnt/state is not a mount point]`, the terminal still
+    // opened because the caller swallows a mount failure, and after the next sleep there was
+    // `[no stored conversation to attach to: starting a new one]`. A bounded mount that fails is not
+    // an improvement over an unbounded one that succeeds.
     console.log(`dsh: first mount attempt failed (${describeError(first)}); clearing and retrying`);
     try {
       await sandbox.unmountBucket(STATE_MOUNT_PATH);
