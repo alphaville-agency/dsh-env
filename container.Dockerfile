@@ -220,6 +220,7 @@ RUN node -e "const f='/root/.dsh/profiles/dsh-tui/package.json';const fs=require
 # cost and quality decision rather than a default - see the file itself.
 COPY dsh-profile/cordis.patch.yml /root/.dsh/profiles/dsh-tui/cordis.patch.yml
 COPY dsh-profile/acp-cordis.patch.yml /root/.dsh/profiles/acp/cordis.patch.yml
+COPY dsh-profile/headless-cordis.patch.yml /root/.dsh/profiles/headless/cordis.patch.yml
 
 # The agent's own configuration, which is what turns a shell with a model into a place that knows how
 # this project works.

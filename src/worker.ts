@@ -360,6 +360,25 @@ function describeError(error: unknown): string {
  * The prompt becomes data on a command line rather than syntax on one, which is the property the
  * previous `JSON.stringify` interpolation did not have.
  */
+/**
+ * Fetch the workspace if it is not there yet, with every byte of it on stderr.
+ *
+ * WHY THE AGENT ROUTE PRIMES AND DID NOT. `dsh-session` runs `dsh-prime` before the TUI - that is what
+ * makes a session "primed" rather than "primed if you remember" - and the agent route had no such
+ * step, so the first real turn through it reported, correctly and honestly:
+ *
+ *   /workspace contains only my probe file. No agency repo.
+ *
+ * The container's disk resets when it sleeps, so an unprimed workspace is the normal state on this
+ * path, not an edge case.
+ *
+ * THE OUTPUT GOES TO STDERR BECAUSE STDOUT IS THE REPLY. `dsh-prime` prints progress as it clones, and
+ * on stdout that text would land in front of the assistant's message - in the buffered route it would
+ * be concatenated into `text`, and in the streaming route it would arrive as a `chunk` that looks like
+ * the model talking. Everything a prime says belongs beside the reply, never inside it.
+ */
+const PRIME_COMMAND = '{ [ -d /workspace/agency ] || dsh-prime >&2; }; ';
+
 function toBase64(text: string): string {
   const bytes = new TextEncoder().encode(text);
   let binary = "";
@@ -405,7 +424,8 @@ async function agent(sandbox: Sandbox, request: Request, env: Env): Promise<Resp
   // path entirely: the only thing interpolated here is a constant.
   const session = await sandbox.getSession(AGENT_SESSION);
   const result = await session.exec(
-    `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
+    PRIME_COMMAND +
+      `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
       `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
       `node /usr/local/bin/agent-ask`,
     { timeout: ROUTE_AGENT_TIMEOUT_MS, env: agentEnv(env) },
@@ -491,7 +511,8 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
     try {
       const agentSession = await sandbox.getSession(AGENT_SESSION);
       const result = await agentSession.exec(
-        `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
+        PRIME_COMMAND +
+          `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
           `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
           `AGENT_ASK_STREAM=1 node /usr/local/bin/agent-ask`,
         {

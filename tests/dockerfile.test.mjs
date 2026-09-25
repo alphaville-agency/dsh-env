@@ -97,6 +97,7 @@ describe("container.Dockerfile: every COPY source exists in the repository", () 
       // Agent Client Protocol. It is a fixed program, not a command field — see src/worker.ts for why
       // that distinction is the whole security argument of that route.
       "bin/agent-ask.mjs",
+      "dsh-profile/headless-cordis.patch.yml",
       // The launcher's manifest and lockfile. The MANIFEST is copied and the TREE is not: the
       // override that makes the launcher installable has to be declared somewhere reviewable, and
       // the lockfile is what makes the resulting tree identical for every build.

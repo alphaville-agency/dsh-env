@@ -1,0 +1,21 @@
+# The headless profile's patch layer — the automation surface's permissions.
+#
+# WHY THIS FILE EXISTS AT ALL, AND WHAT ITS ABSENCE COST. The `dsh-tui` profile has set
+# `danger-full-access` for a long time (see `cordis.patch.yml`, which explains the reasoning), and the
+# `headless` profile had no patch layer of its own - so the first real turn driven through the agent
+# route opened with:
+#
+#   bash is unavailable entirely (sandbox backend unusable; escalation needs approval, no approval
+#   channel → fails closed)
+#
+# which is the harness behaving correctly and telling us exactly what was wrong. `dsh-base` ships the
+# sandbox backend with an approval gate, and with no approval channel on an automation surface every
+# escalation fails closed - a control surface that cannot run a command cannot do the work it exists
+# for. This is the same permission the TUI has, for the same reason, applied to the second door.
+#
+# It is a permission for the WORK, not for money: it does not fund a wallet or mint a shared account.
+# Those bounds live in `AGENTS.md` and in the gateway's rate limit.
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    defaultPreset: danger-full-access
