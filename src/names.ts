@@ -89,6 +89,16 @@ export const ROUTE_ROOT = "/";
  * answer to the right instinct: the session's shell is not the client's business at all.
  */
 export const TERMINAL_SHELL = "dsh-session";
+
+/**
+ * The harness home inside the container, and the variable that names it.
+ *
+ * The image declares both with `ENV DSH_HOME=/root/.dsh`, and the ACP route passes them explicitly
+ * because an `exec` environment does not inherit the image's `ENV`: without them the harness composes
+ * no providers and every session fails with `no adapter registered for provider "cf-ai-gateway"`.
+ */
+export const DSH_HOME_PATH = "/root/.dsh";
+export const DSH_HOME_ENV = "DSH_HOME";
 /**
  * There is no auth constant here, and that is the point.
  *

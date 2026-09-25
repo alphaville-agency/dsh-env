@@ -57,6 +57,8 @@ import {
   STATE_MOUNT_PATH,
   STATE_MOUNT_TIMEOUT_MS,
   STATE_PROBE_TIMEOUT_MS,
+  DSH_HOME_PATH,
+  DSH_HOME_ENV,
   TERMINAL_SHELL,
   WEBSOCKET_UPGRADE,
 } from "./names";
@@ -327,7 +329,32 @@ function describeError(error: unknown): string {
  * Returns `text` (the assistant's reply), `stopReason`, and `usage`. It fails loudly: a route that
  * silently returns an empty reply would be indistinguishable from a session that ignored the prompt.
  */
-async function agent(sandbox: Sandbox, request: Request): Promise<Response> {
+/**
+ * The environment every `agent-ask` run needs, stated rather than inherited.
+ *
+ * WHY THIS IS NOT LEFT TO THE IMAGE. The image sets `DSH_HOME=/root/.dsh` with an `ENV` line and the
+ * container is given `CF_AI_GATEWAY_TOKEN` through `setEnvVars`. Neither is visible to an `exec`
+ * environment: the ACP session failed with
+ *
+ *   session/new: Internal error {"details":"no adapter registered for provider \"cf-ai-gateway\""}
+ *
+ * which is what the harness reports when the pi-ai provider list is empty - and the list is empty
+ * when `settings.yaml` cannot be found under `DSH_HOME`, or when the provider's `apiKeyEnv` variable
+ * is not set. The profile resolved (`--profile acp` started an ACP server and answered), so the
+ * symptom is specifically the settings/credential half of the environment. Naming all three here
+ * makes the route independent of what the exec environment happens to carry.
+ */
+function agentEnv(env: Env): Record<string, string> {
+  const values: Record<string, string> = {
+    HOME: "/root",
+    [DSH_HOME_ENV]: DSH_HOME_PATH,
+  };
+  const modelKey = env[MODEL_KEY_ENV];
+  if (typeof modelKey === "string" && modelKey.length > 0) values[MODEL_KEY_ENV] = modelKey;
+  return values;
+}
+
+async function agent(sandbox: Sandbox, request: Request, env: Env): Promise<Response> {
   if (request.method !== METHOD_POST) {
     return new Response("the agent route takes a prompt: POST {\"prompt\": \"...\"}", { status: 405 });
   }
@@ -351,7 +378,7 @@ async function agent(sandbox: Sandbox, request: Request): Promise<Response> {
   // its diagnostics on stderr, so what comes back here is the model's answer and not a log line.
   const result = await sandbox.exec(
     `AGENT_PROFILE=${ROUTE_AGENT_PROFILE} node /usr/local/bin/agent-ask ${JSON.stringify(prompt)}`,
-    { timeout: ROUTE_AGENT_TIMEOUT_MS },
+    { timeout: ROUTE_AGENT_TIMEOUT_MS, env: agentEnv(env) },
   );
   const stdout = (result.stdout ?? "").trim();
   const exitCode = result.exitCode ?? 1;
@@ -386,7 +413,7 @@ async function agent(sandbox: Sandbox, request: Request): Promise<Response> {
  * prompts would interleave turns of the same conversation with no ordering the caller can see. Ask,
  * read the answer, close, reconnect.
  */
-async function agentStream(sandbox: Sandbox, request: Request): Promise<Response> {
+async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promise<Response> {
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
   server.accept();
@@ -437,6 +464,7 @@ async function agentStream(sandbox: Sandbox, request: Request): Promise<Response
           `node /usr/local/bin/agent-ask ${JSON.stringify(prompt)}`,
         {
           timeout: ROUTE_AGENT_TIMEOUT_MS,
+          env: agentEnv(env),
           stream: true,
           // stderr carries `agent-ask`'s diagnostics and must not be read as protocol frames.
           onOutput: (stream, data) => {
@@ -505,9 +533,9 @@ export default {
       // The upgrade is what makes this the streaming surface; without it the same path is the
       // one-shot JSON route, so a caller that only wants an answer needs no second URL.
       if (request.headers.get("Upgrade")?.toLowerCase() === WEBSOCKET_UPGRADE) {
-        return await agentStream(sandbox, request);
+        return await agentStream(sandbox, request, env);
       }
-      return await agent(sandbox, request);
+      return await agent(sandbox, request, env);
     }
     if (url.pathname === ROUTE_TERMINAL) return await terminal(request, env);
 
