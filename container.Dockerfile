@@ -48,13 +48,6 @@ RUN apt-get update \
  && apt-get clean \
  && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
 
-# Every one of them must be present when the image is built. A package nobody exercises is a package
-# nobody has proved is installed - and the brief path above was exactly that failure in reverse:
-# python3 was absent, and the missing interpreter failed silently behind `|| true`.
-RUN for t in tmux rg less make python3 gpg gh git; do \
-        command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 1; }; \
-    done \
- && python3 --version
 
 # The harness, which is the entire point of this environment: without it the container is a shell in
 # the cloud rather than a place to work.
@@ -256,3 +249,17 @@ RUN test -f /root/.dsh/AGENTS.md \
 RUN command -v dsh \
  && dsh --version \
  && test -d /root/.dsh/profiles/dsh-tui/node_modules/@deepseek-harness-tui/dsh-tui
+
+# THE TOOLCHAIN CHECK, AT THE END - deliberately, because that is where every installer has finished.
+# It failed once by being placed before gh (a tarball install at line ~128), which taught the rule it
+# now states: a package nobody exercises is a package nobody has proved is installed, and a check that
+# runs before the install proves only that the check is misplaced.
+#
+# This is also the only place a missing tool can be caught. The brief path was the counter-example:
+# python3 was absent, the interpreter failed, `|| true` swallowed it, and the boot banner showed the
+# result six hours later in front of the operator.
+RUN for t in git curl jq tmux rg less make python3 gpg gh node npm dsh; do \
+        command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 1; }; \
+    done \
+ && python3 --version \
+ && gh --version | head -1
