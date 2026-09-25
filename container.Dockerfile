@@ -198,7 +198,7 @@ RUN dsh plugin --profile acp add "${DSH_TUI_BUNDLE}" @deepseek-ai/dsh-acp-app \
 RUN mkdir -p /root/.dsh/profiles/headless \
  && printf '%s' '{"name":"dsh-profile-headless","private":true,"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-headless"],"patchReload":"startup"}}}' \
       > /root/.dsh/profiles/headless/package.json \
- && ln -sfn /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules /root/.dsh/profiles/headless/node_modules \
+ && ln -sfn /opt/dsh-install/node_modules /root/.dsh/profiles/headless/node_modules \
  && node -e "const p=require.resolve('@deepseek-ai/dsh-headless',{paths:['/root/.dsh/profiles/headless']});if(!p){throw new Error('unresolved')}console.log('headless bundle resolves from '+p)"
 
 # Turn OFF live patch reloading, which is a laptop feature and cannot work here.
