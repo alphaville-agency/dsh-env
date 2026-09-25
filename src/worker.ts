@@ -495,14 +495,24 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
           timeout: ROUTE_AGENT_TIMEOUT_MS,
           env: agentEnv(env),
           stream: true,
-          // stderr carries `agent-ask`'s diagnostics and must not be read as protocol frames.
+          // stderr is forwarded as its own frame type rather than parsed as protocol. It is where
+          // `dsh --profile headless` streams its REASONING and where every diagnostic lands, so
+          // dropping it (the previous behaviour) left a stalled turn with nothing to read: the route
+          // could say that nothing came back but never why.
           onOutput: (stream, data) => {
             if (stream === "stdout") forward(data);
+            else send({ type: "stderr", text: data });
           },
         },
       );
       if (partial.trim().length > 0) send({ type: "frame", raw: partial.trim() });
-      send({ type: "exit", exitCode: result.exitCode ?? 1 });
+      // The captured stderr tail travels with the exit, because a run can fail before it prints
+      // anything to the stream (a spawn error, a boot failure) and then the frames alone say nothing.
+      send({
+        type: "exit",
+        exitCode: result.exitCode ?? 1,
+        stderr: (result.stderr ?? "").slice(-2000),
+      });
     } catch (error) {
       send({ type: "error", message: describeError(error) });
     } finally {
