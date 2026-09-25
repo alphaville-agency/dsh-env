@@ -51,6 +51,7 @@ import {
   SLEEP_AFTER,
   STATE_BINDING,
   STATE_MOUNT_PATH,
+  STATE_MOUNT_TIMEOUT_MS,
   TERMINAL_SHELL,
   WEBSOCKET_UPGRADE,
 } from "./names";
@@ -192,6 +193,28 @@ function describe(): Response {
 const MOUNTED = "STATE-MOUNTED";
 
 /**
+ * Give a promise a deadline, and say which one ran out.
+ *
+ * There is no `AbortSignal` on `mountBucket`, so this cannot cancel the mount - it stops WAITING for
+ * it, which is the property that matters here: the request has to finish. The abandoned operation
+ * settles on its own or not at all, and the next request asks the container rather than the SDK
+ * whether the path is mounted, so a mount that eventually lands is still picked up.
+ */
+async function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: number | null = null;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+/**
  * Back the container's session store with R2, before the PTY that will read it opens.
  *
  * WHY THIS IS HERE AND NOT IN A LIFECYCLE HOOK. Two earlier attempts restored and captured the store
@@ -205,19 +228,15 @@ const MOUNTED = "STATE-MOUNTED";
  * SDK's own bookkeeping (`activeMounts`) lives in the Durable Object's memory, where it can outlive
  * the container it describes. `mountpoint` inside the container is the ground truth; when it says
  * the path is mounted, there is nothing to do and nothing to re-do.
- *
- * WHY A FAILURE IS SWALLOWED. This gates a terminal. A container whose store could not be backed is
- * still a usable workspace with a local session store, and failing the upgrade instead would trade
- * `./dsh.sh` for an error page describing a problem the operator cannot act on. So the failure is
- * logged and the terminal opens; `bin/dsh-session` independently reports whether the store is backed,
- * from inside the container, which is where the operator can see it.
  */
 async function ensureStateMounted(sandbox: Sandbox): Promise<string> {
   const probe = await sandbox.exec(
     `mountpoint -q ${STATE_MOUNT_PATH} && echo ${MOUNTED} || echo not-mounted`,
   );
+  console.log(`dsh: state mount probe: ${probe.stdout.trim() || probe.stderr.trim()}`);
   if (probe.stdout.includes(MOUNTED)) return "already mounted";
 
+  console.log(`dsh: mounting ${STATE_BINDING} at ${STATE_MOUNT_PATH}`);
   const mount = () => sandbox.mountBucket(STATE_BINDING, STATE_MOUNT_PATH, {});
   try {
     await mount();
@@ -226,6 +245,7 @@ async function ensureStateMounted(sandbox: Sandbox): Promise<string> {
     // mount at a path it believes is in use. Clearing that record is what lets the retry reach s3fs
     // at all; the unmount of a mount that is not there is itself an error, and not an interesting
     // one, because the mount below is the thing being attempted.
+    console.log(`dsh: first mount attempt failed (${describeError(first)}); clearing and retrying`);
     try {
       await sandbox.unmountBucket(STATE_MOUNT_PATH);
     } catch {
@@ -251,8 +271,19 @@ async function terminal(request: Request, env: Env): Promise<Response> {
   const sandbox = sandboxFor(env);
   await injectSecrets(sandbox, env);
 
+  // The container is started HERE, before the mount is timed. A cold start is the whole point of this
+  // path, so timing the mount from before the container exists would abandon it on exactly the
+  // reconnect it is for. Naming the session is the wait, and the platform bounds it.
+  const session = await sandbox.getSession(TERMINAL_SESSION);
+  console.log("dsh: terminal session ready; backing the session store");
+
   try {
-    console.log(`dsh: session store backing: ${await ensureStateMounted(sandbox)}`);
+    const backed = await withTimeout(
+      ensureStateMounted(sandbox),
+      STATE_MOUNT_TIMEOUT_MS,
+      "the state mount",
+    );
+    console.log(`dsh: session store backing: ${backed}`);
   } catch (error) {
     console.log(
       `dsh: could not back the session store with R2: ${describeError(error)}. The terminal still ` +
@@ -260,7 +291,6 @@ async function terminal(request: Request, env: Env): Promise<Response> {
     );
   }
 
-  const session = await sandbox.getSession(TERMINAL_SESSION);
   return await session.terminal(request, { shell: TERMINAL_SHELL });
 }
 

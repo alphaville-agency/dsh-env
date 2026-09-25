@@ -125,6 +125,22 @@ export const STATE_BINDING = "STATE";
 export const STATE_MOUNT_PATH = "/mnt/state";
 
 /**
+ * How long the mount may take before the terminal stops waiting for it.
+ *
+ * THE MOUNT GATES A TERMINAL, SO IT MAY NOT GATE IT INDEFINITELY. Measured on this environment: the
+ * first version of this call hung, and a `curl` WebSocket upgrade with a 600-second limit received
+ * **zero bytes** - not an error, not a 502, nothing - because the Worker was still awaiting a
+ * container API call. A workspace whose store is local is still a workspace; a `./dsh.sh` that never
+ * returns is not. Once this fires, the upgrade proceeds and `bin/dsh-session` finds no mount and says
+ * so, which is the fallback path and not a silent one.
+ *
+ * It is generous rather than tight on purpose: the container is started by the session lookup before
+ * this is called, so the mount itself is a short operation when it works at all, and the failure it
+ * guards against is one that never finishes rather than one that is merely slow.
+ */
+export const STATE_MOUNT_TIMEOUT_MS = 30_000;
+
+/**
  * The harness's conversation store inside the container.
  *
  * WHY IT IS A SYMLINK TARGET RATHER THAN A DIRECTORY. The container's disk is discarded when it
