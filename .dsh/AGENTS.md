@@ -38,3 +38,42 @@ Full text: [`rules/dangling-references.md`](rules/dangling-references.md) — re
 ## The laptop builds the environment; the environment builds the agency
 Full text: [`rules/where-work-happens.md`](rules/where-work-happens.md) — read it before starting any agency, product or infrastructure work that is not about the environment itself. This laptop builds and operates the remote environment; clean-slate development happens inside it; the frozen legacy project is never resumed; and anything that cannot be done remotely is named as a limitation each time rather than assumed.
 
+## Inference spending: the operator decides, the environment decides for itself
+
+The default is the **reserved pool**: `deepseek-v4.1-flash` as the cheapest suitable orchestrator,
+with `mimo-v2.6-flash` beside it. During the reserved block that subscription is already paid for, so
+using it costs nothing at the margin and it is what every environment should reach for first.
+
+**Escalation is by rule, never by mood.** In order: the pool (free at the margin) → the worker role
+(`gpt-5.6-luna`, answered as `mimo-v2.6-flash` inside the reserved block) → the frontier chain
+(`gpt-5.6-sol`, `gpt-6-astra`, `claude-opus-5.5`, `claude-opus-5`) for the reviewer, advisor and
+final-authority roles. Ask for a higher tier when the ROLE requires it; do not reach for the top
+model because a task feels hard.
+
+**A wallet spend needs the operator's confirmation first.** The frontier chain is wallet-only, and
+every entry in it answered HTTP 402 `Insufficient wallet balance` when measured on 2026-09-25. So:
+
+- do NOT fund the wallet, and do not enable Cloudflare unified billing, on your own initiative;
+- do NOT silently downgrade a role to a free model when the frontier chain refuses — report the 402
+  and say what it would cost, then wait;
+- do NOT retry a 402 in a loop or across models hoping one succeeds.
+
+That is the line: the reserved pool is the environment's to spend, and the wallet is the operator's to
+authorise.
+
+**The agency is the exception, and it is deliberate.** The agency runs with no operator in the loop,
+so it acts on its own judgement: autopilot, its own decisions, its own escalation. When the custom
+gateway does not carry the model it needs, it routes to **unified billing through Cloudflare's native
+providers** rather than to our wallet. Its spending is bounded by two things that do not depend on its
+own restraint, and by its agents' own judgement about what a task is worth:
+
+- **a rate limit on `alphaville-inference-gateway` — set, 120 requests per 60 seconds** (measured back
+  from the API).
+- **a budget of $15/month on that gateway** — *not yet set, and not settable from here*. The
+  account-wide `spending_limit` API is deprecated and refuses to be created or modified ("AI Gateway
+  spending limits are deprecated and can no longer be created, enabled, or modified"), and the
+  replacement per-gateway spend limits have no published API endpoint — four plausible paths all
+  answer `Route not found`. So the $15 budget is a **dashboard step**: AI Gateway →
+  `alphaville-inference-gateway` → Settings → Spend limits → add a rule for $15 over a monthly
+  window. Until it exists, the only spend bound on the agency is its rate limit and its own agents'
+  discipline.

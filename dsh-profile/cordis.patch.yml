@@ -17,7 +17,7 @@
     modelSelectionSettings: true
     backgroundMode: continuable
     agentOptions:
-      provider: cheapinference-com
+      provider: cf-ai-gateway
       model: gpt-5.6-luna
       reasoningEffort: high
       maxTokens: 128000
@@ -29,7 +29,7 @@
     toolName: subagent_fork
     backgroundMode: continuable
     agentOptions:
-      provider: cheapinference-com
+      provider: cf-ai-gateway
       model: gpt-5.6-luna
       reasoningEffort: high
       maxTokens: 128000

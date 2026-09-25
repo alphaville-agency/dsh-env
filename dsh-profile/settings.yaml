@@ -1,74 +1,49 @@
 ui-onboarding:
   welcomeNoticeVersion: 2026-08-13.1
 agent-default-model:
-  provider: cheapinference-com
+  provider: cf-ai-gateway
   model: deepseek-v4.1-flash
 subagent-model-selection:
   enabled: true
   allowedModels:
-    - provider: cheapinference-com
+    - provider: cf-ai-gateway
       model: gpt-5.6-luna
-    - provider: cheapinference-com
-      model: deepseek-v4-flash
-    - provider: cheapinference-com
+    - provider: cf-ai-gateway
       model: deepseek-v4.1-flash
-    - provider: cheapinference-com
+    - provider: cf-ai-gateway
+      model: mimo-v2.6-flash
+    - provider: cf-ai-gateway
       model: gpt-5.6-sol
+# ONE PROVIDER, AND THE SAME ONE AS THE LAPTOP. The only difference between this environment and the
+# operator's machine is the path segment: /dsh here, /operator there, /alphaville for the agency.
+# Everything else — which account is already paid for at this instant, and which model is the closest
+# match in it — is decided behind that URL by the inference-router Worker, so this file carries no
+# provider key and no time logic.
 llm-pi-ai:
   providers:
-    cheapinference-com:
-      displayName: cheapinference.com
-      apiKeyEnv: CHEAPINFERENCE_COM_API_KEY
+    cf-ai-gateway:
+      displayName: aig.drksci.com (dsh)
+      apiKeyEnv: CF_AI_GATEWAY_TOKEN
       api: openai-completions
-      baseURL: https://api.cheaperinference.com/v1
+      baseURL: https://aig.drksci.com/dsh/v1
       models:
-        - id: deepseek-v4-flash
-          name: deepseek-v4-flash
-          contextWindow: 1000000
-          maxTokens: 128000
         - id: deepseek-v4.1-flash
           name: deepseek-v4.1-flash
           contextWindow: 1048576
           maxTokens: 384000
-        - id: gpt-5.6-sol
-          name: gpt-5.6-sol
-          contextWindow: 1050000
-          maxTokens: 128000
-        # contextWindow/maxTokens for gpt-5.6-luna are MIRRORED from gpt-5.6-sol,
-        # not discovered: the provider /v1/models endpoint was not queried
-        # because CHEAPINFERENCE_COM_API_KEY is unset on this machine.
         - id: gpt-5.6-luna
           name: gpt-5.6-luna
           contextWindow: 1050000
           maxTokens: 128000
-# ONLY PROVIDER. cheapinference.com is the sole route, and every other provider module is left
-# deliberately empty rather than configured: a second provider that is reachable is a second
-# place a session can spend money and a second thing to keep credentials for. The key is not
-# here - `apiKeyEnv` names the environment variable, and the value arrives at run time from a
-# Worker secret (see src/worker.ts, injectModelKey).
+        - id: mimo-v2.6-flash
+          name: mimo-v2.6-flash
+          contextWindow: 1048576
+          maxTokens: 128000
+        - id: gpt-5.6-sol
+          name: gpt-5.6-sol
+          contextWindow: 1050000
+          maxTokens: 128000
+# Left empty on purpose: one route, because a second configured provider is a second place a session
+# can spend money and a second credential to keep.
 llm-deepseek:
   models: []
-dsh-tui:
-  scrollGutter: timeline
-  pageMargin: normal
-  foldTerminalCommand: true
-  promptSessionLabel: true
-  whale: false
-  whaleIdle: false
-  minimal: false
-  statusBar:
-    thinking: true
-    tokens: false
-    cache: false
-    cost: true
-    tps: true
-    gitBranch: true
-    sessionTitle: true
-    sessionId: true
-    goal: false
-    mode: true
-    activity: true
-    trajectory: true
-  thinkingFold: preview
-  toolBackground: none
-  effortDefault: high

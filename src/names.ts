@@ -81,11 +81,13 @@ export const TERMINAL_SHELL = "dsh-session";
  * The environment variable the harness reads its model credential from.
  *
  * The name is not ours to choose: the profile's settings.yaml declares
- * `apiKeyEnv: CHEAPINFERENCE_COM_API_KEY`, so the container must carry exactly this variable.
+ * `apiKeyEnv: CF_AI_GATEWAY_TOKEN`, so the container must carry exactly this variable. The value is
+ * the inference-router token, NOT a provider key: the provider keys live in the AI Gateways, which is
+ * what stops a container from holding one at all.
  * It is injected from a Worker secret with setEnvVars and never appears in this repository or
  * in the image.
  */
-export const MODEL_KEY_ENV = "CHEAPINFERENCE_COM_API_KEY";
+export const MODEL_KEY_ENV = "CF_AI_GATEWAY_TOKEN";
 
 /**
  * The environment variable gh reads its credential from.

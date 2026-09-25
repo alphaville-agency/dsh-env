@@ -1,153 +1,68 @@
-# LLM routing through AI Gateway
+# LLM routing
 
-Two AI Gateway instances sit in front of the same upstream provider so that spend and usage are
-attributable per consumer. Design and names below are verified against the official docs; the
-provisioning calls have **not** been executed — see [Why this is not provisioned yet](#why-this-is-not-provisioned-yet).
+Every environment — this machine, the remote dsh container, and the agency — reaches models through
+**one provider**: the router at `https://aig.drksci.com/<environment>/v1`.
 
-## The upstream is a custom provider
+| environment | URL | gateway it reaches |
+|---|---|---|
+| this machine | `https://aig.drksci.com/operator/v1` | `operator-inference-gateway` |
+| remote dsh | `https://aig.drksci.com/dsh/v1` | `dsh-inference-gateway` |
+| agency | `https://aig.drksci.com/alphaville/v1` | `alphaville-inference-gateway` |
 
-cheapinference is not a natively supported provider, so it is registered as a **Custom Provider**.
-From the [Custom Providers guide](https://developers.cloudflare.com/ai-gateway/configuration/custom-providers/):
+The settings file holds a URL and a credential reference, and nothing else. It does not name an
+account, a provider key, a model mapping or a time window, because all of that is decided behind the
+URL. The built and deployed configuration lives in the private repository
+[`drksci/cf-ai-gateway`](https://github.com/drksci/cf-ai-gateway); this file records what this
+repository depends on, not how to build it.
 
-| field | value |
-|---|---|
-| `name` | `cheapinference` |
-| `slug` | `cheapinference` — requests reference it as **`custom-cheapinference`** |
-| `base_url` | `https://api.cheaperinference.com` — **root domain only**; `/v1/chat/completions` is part of the request path, not of `base_url` |
-| `enable` | `true` — it defaults to `false` |
+## The rule
 
-```sh
-curl -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/ai-gateway/custom-providers" \
-  -H "Authorization: Bearer $CF_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "cheapinference",
-    "slug": "cheapinference",
-    "base_url": "https://api.cheaperinference.com",
-    "enable": true
-  }'
-```
+Two accounts, and the decision between them is **"which one is already paid for at this instant"**:
 
-`name`, `slug` and `base_url` are required; `base_url` must start with `https://`, and the slug must
-be unique in the account (a duplicate returns `409`, code 1003).
-
-## The two gateways
-
-**Both exist now, and both names are derived from the registry rather than chosen here.** The gateway
-id is the `cloudflare_ai_gateway` serialisation of the logical id — run
-`python3 ontology/validate.py render <logical_id>` in the capability repository before adding a third.
-
-| logical id | gateway id (used in URLs) | consumer | created |
+| instant | account | billing | models |
 |---|---|---|---|
-| `shared.tooling.dsh.gateway` | `shared-tooling-dsh-gateway` | the dsh developer environment (this repository) | 2026-09-22 |
-| `dev.agency.inference.gateway` | `dev-agency-inference-gateway` | the agency | 2026-09-22 |
+| inside a reserved block | CheapestInference | flat monthly, uncapped | the `core` pool: `deepseek-v4.1-flash`, `mimo-v2.6-flash` |
+| outside every block | CheaperInference | per token, from the wallet | 72 models, including the whole ladder |
 
-An earlier name, `dev-agency-gateway`, was created and then deleted: it was three levels, not four,
-so it had no legal logical id. It is recorded here because a name that quietly changed is worse than
-one that is explained.
+The hours are not a policy written down here: they are the account's own reserved blocks, read from
+the vendor's management API (`GET /api/billing/status` → `hours: [8…15]` UTC, the `europe` block,
+which is 18:00–02:00 Brisbane) and cached by the router. Adding, moving or cancelling a block changes
+the routing without an edit anywhere.
 
-Both use the same custom provider and therefore the same models. They are separate gateways so that
-billing attribution, analytics, logging, rate limiting and caching are per consumer.
+When the client asks for a model the reserved pool does not carry, the router answers with the
+**closest match in the pool** rather than silently moving the request to the wallet. `gpt-5.6-luna` is
+the one model this affects today: inside the reserved block it is served as `mimo-v2.6-flash`.
 
-Created with the API method documented at
-<https://developers.cloudflare.com/api/resources/ai_gateway/methods/create/>. The working request
-body was determined by trying it: `cache_invalidate_on_update` is **required**, and omitting it fails
-with `7001 Required body cache_invalidate_on_update`. The body used was:
+## What this repository holds
 
-```json
-{
-  "id": "<the gateway id from the table above>",
-  "name": "<the logical id>",
-  "collect_logs": true,
-  "cache_ttl": 0,
-  "cache_invalidate_on_update": true,
-  "rate_limiting_interval": 0,
-  "rate_limiting_limit": 0,
-  "authentication": false
-}
-```
+| name | where it lives | what it is |
+|---|---|---|
+| `CF_AI_GATEWAY_TOKEN` | Worker secret in the container; credential-store ref on a laptop | what a caller presents to the router |
+| the provider keys | stored in the AI Gateways (BYOK) | never in this repository and never in the container |
 
-Note that the platform does not return or persist `name`: a read-back shows it as null, and the **id
-is the identity**. That is another reason the id must come from the registry rather than be typed.
+The profile declares `apiKeyEnv: CF_AI_GATEWAY_TOKEN` and `baseURL: https://aig.drksci.com/dsh/v1`,
+and `src/names.ts` exports that variable name so the Worker injects exactly it
+(`MODEL_KEY_ENV`). A request carries **no provider authorization header**: AI Gateway substitutes the
+stored key only when that header is absent, and a placeholder would be forwarded and rejected.
 
-## Calling each gateway
+## Two measured facts to know before touching this
 
-The account id is `ed5246df839f2f05c5ac88597e0f2177`.
+- **`gpt-5.6-sol` answers HTTP 402 `insufficient_balance`.** The wallet is unfunded, so the final
+  authority and Sprint reviewer roles cannot run at all. That is funding, not routing.
+- **Nested AI Gateways do not work.** A custom provider whose `base_url` points at another
+  `gateway.ai.cloudflare.com` endpoint fails with an immediate 522 (measured repeatedly, while direct
+  calls to the same gateway succeed). Per-account visibility therefore comes from each environment
+  gateway's own analytics, which already break down by provider and model, rather than from an
+  upstream gateway hop. The two account gateways exist and answer direct calls; nothing routes
+  through them.
 
-```
-Gateway URL:  https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/custom-{slug}/{provider-path}
-Upstream URL: {base_url}/{provider-path}
-```
+## Not yet done
 
-**Unified API** — provider-independent; only the model id changes:
-
-```sh
-curl "https://gateway.ai.cloudflare.com/v1/ed5246df839f2f05c5ac88597e0f2177/shared-tooling-dsh-gateway/compat/chat/completions" \
-  -H "Authorization: Bearer $CHEAPINFERENCE_API_KEY" \
-  -H "cf-aig-authorization: Bearer $CF_AIG_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "custom-cheapinference/<model-name>",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
-**Provider-specific endpoint** — full control of the upstream path, same auth headers:
-
-```sh
-curl "https://gateway.ai.cloudflare.com/v1/ed5246df839f2f05c5ac88597e0f2177/dev-agency-gateway/custom-cheapinference/v1/chat/completions" \
-  -H "Authorization: Bearer $CHEAPINFERENCE_API_KEY" \
-  -H "cf-aig-authorization: Bearer $CF_AIG_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "<model-name>", "messages": [{"role": "user", "content": "Hello!"}]}'
-```
-
-For an OpenAI-compatible SDK, set its base URL to
-`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/custom-cheapinference/v1` and pass
-`cf-aig-authorization` as a default header; the SDK appends `/chat/completions`.
-
-**The Unified API is marked "Deprecated for single-model calls"** in the official docs, which now
-point single-model traffic at the REST API,
-`https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions`. The
-`/compat/chat/completions` endpoint still works, is what the Custom Providers guide documents, and
-remains required for dynamic routing. Use it, but know it is on a deprecation path.
-
-**BYOK is the preferred way to hold the provider key** (store it in the gateway rather than sending
-it on every request). Not implemented here.
-
-## Billing: what this does and does not do
-
-- AI Gateway sits **in front of** the provider. It gives attribution, analytics, cost visibility,
-  caching, rate limits and fallback. It does **not** replace the upstream provider's billing.
-- Both gateways currently send requests under the **same provider key**, so the money still goes to
-  the cheapinference account that owns it. Two gateways give two views of one bill — not two bills.
-- "Unified billing" becomes literal only when the models are served by a provider Cloudflare bills
-  directly (Workers AI, a natively-billed provider, or prepaid AI Gateway credits).
-- **Open decision for the operator:** (a) accept the shared upstream account, (b) issue a second
-  cheapinference account and key for the agency, or (c) move to a provider Cloudflare bills. Nothing
-  in this repository assumes an answer.
-
-## Credentials
-
-Never committed, never in the image, never printed. `CHEAPINFERENCE_API_KEY` and `CF_AIG_TOKEN` are
-runtime secrets: read from the environment locally, or from Worker secrets when deployed.
-
-## Why this is not provisioned yet
-
-The account-side calls could not be made from the session that wrote this file, and the failure is a
-missing credential rather than a permissions gap. Verbatim:
-
-```
-$ npx wrangler whoami
- ⛅️ wrangler 4.136.1
-────────────────────
-Getting User settings...
-
-✘ [ERROR] Not logged in. Your auth token has expired and could not be refreshed, and the
-  environment is non-interactive. Run `wrangler login` in an interactive terminal or set a
-  CLOUDFLARE_API_TOKEN.
-```
-
-No `CF_*`, `CLOUDFLARE_*` or `cfat_*` variable exists in the process environment either. To finish
-the plumbing: run `wrangler login` (or export a token with `AI Gateway - Edit`), then execute the
-custom-provider call above and create the two gateways.
+The container's copy of this configuration **cannot be deployed from here**: the remote dsh Worker
+(`shared-tooling-dsh-shell`) lives in Cloudflare account `ed5246df839f2f05c5ac88597e0f2177`, and the
+credential available on this machine cannot see that account — `GET /accounts/ed5246…/workers/scripts/shared-tooling-dsh-shell`
+answers `10000 Authentication error`, while the same Worker answers `10007 This Worker does not exist
+on your account` in the account the credential *can* see. So `dsh-profile/settings.yaml`,
+`dsh-profile/cordis.patch.yml`, `src/names.ts` and `.dsh/MODEL-ROLES.md` here are **prepared and
+committed, and waiting for a deploy made with credentials for that account**. Until then the container
+still runs the old `cheapinference-com` route.
