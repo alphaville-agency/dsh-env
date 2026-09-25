@@ -1,211 +1,120 @@
 #!/usr/bin/env node
-// One prompt over ACP, one reply on stdout — the bounded thing POST /agent runs.
+// One prompt in, one reply out — the bounded thing the Worker's agent route runs.
 //
-// WHY RESUME AND NOT `session/new`. Each call boots its own `dsh --profile acp` process, so the
-// handshake is cheap but a fresh session pays full composition on every request; measured cold, that
-// was a client-side 150 s timeout before a single token moved. A session that is already persisted
-// RESUMES instead: measured on this machine, `session/resume` answers in 708 ms against a
-// `session/new` that could not be timed at all, because resume skips composition and restores the
-// log rather than rebuilding it. The reply then arrives in a normal model turn — 5.4 s for a
-// one-line answer. So the sessionId is kept on disk (one file, the whole argument) and reused until
-// the server says it is gone, at which point falling back to `session/new` is the correct thing
-// rather than a failure.
+// WHY HEADLESS AND NOT ACP, WHICH IS WHAT THIS USED TO BE. `dsh --profile acp` was chosen because its
+// provider is an ordinary config row rather than a gated adapter, and it did serve sessions from this
+// laptop. In the container it does not: `session/new` is accepted and then no frame arrives for
+// minutes, while the TUI over the same settings, provider and session store answers normally. The TUI
+// answering is the evidence that matters — the model route and agent creation both work inside this
+// container, so the stall is the ACP application's, and chasing it is not what this surface is for.
 //
-// WHY NOT A FLAG ON `dsh --profile acp`. That profile SERVES until the client disconnects; there is
-// no --ask, and there cannot be one, because the protocol is a conversation: initialize, then
-// resume-or-new, then session/prompt, each answering before the next makes sense. So the calls live
-// here, in the shape the ACP README documents, and this script ends on `end_turn`.
+// `dsh --profile headless "task"` is the harness's own one-shot: it answers one task, streams its
+// reasoning to STDERR, prints the final assistant message to STDOUT and exits. There is no protocol
+// to speak and no client to keep alive, which is exactly the shape of a control surface that must not
+// be able to hang on a handshake.
 //
-// STDOUT IS ONLY THE REPLY. The Worker parses this line and nothing else, so a stray log on stdout
-// would be read as an answer — which is why everything diagnostic goes to stderr.
+// THE PROMPT NEVER TOUCHES A SHELL. It is read from `AGENT_PROMPT_FILE` and passed to `dsh` as a
+// single argv element, so a prompt containing `$(...)`, backticks or quotes is data and not code. The
+// previous version was handed to the Worker as a JSON string interpolated into a shell command line,
+// where `$(...)` inside double quotes is command substitution — an injection on a route that exists
+// precisely so that no request field can reach argv.
 //
-//   node agent-ask.mjs "the prompt"
+//   AGENT_PROMPT_FILE=/tmp/p.txt node agent-ask.mjs
 //
-// WITH `AGENT_ASK_STREAM=1` STDOUT BECOMES NEWLINE-DELIMITED JSON INSTEAD. The reply is the last
-// thing to exist in the buffered form, which made a streaming consumer wait for the whole turn to
-// see anything at all. In stream mode each frame is one line - `session`, then one `chunk` per
-// assistant text delta as ACP delivers it, then `done` or `error` - so a WebSocket can forward
-// progress while the turn is still running. The two modes never mix: the Worker picks one and parses
-// accordingly, because a stream of NDJSON read as a reply would return framing as an answer.
+// With `AGENT_ASK_STREAM=1` stdout becomes newline-delimited JSON frames instead of a bare reply, so
+// the WebSocket route can forward progress; the two modes never mix.
 //
 // Exits 0 with the reply, non-zero with the reason on stderr. No retry loop: a failed call is a
-// result to report, not something to paper over by asking twice. The one exception is a stale
-// sessionId — resuming a session the server no longer has is not a failure of the prompt, so that
-// single case falls back to a fresh session, once.
+// result to report.
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
-const prompt = process.argv.slice(2).join(" ").trim();
+const PROMPT_FILE = process.env.AGENT_PROMPT_FILE ?? "";
+// The argv form is kept for local use and for tests; the Worker always uses the file, so no request
+// data is ever placed on a command line.
+const prompt = (
+  PROMPT_FILE ? (() => {
+    try {
+      return readFileSync(PROMPT_FILE, "utf8");
+    } catch {
+      return "";
+    }
+  })() : process.argv.slice(2).join(" ")
+).trim();
+
 if (!prompt) {
-  process.stderr.write("usage: agent-ask.mjs <prompt>\n");
+  process.stderr.write("usage: AGENT_PROMPT_FILE=<file> node agent-ask.mjs  (or pass the prompt as argv)\n");
   process.exit(2);
 }
-// Bounded, because this runs inside an HTTP request that already has a deadline.
-const DEADLINE_MS = Number(process.env.AGENT_ASK_TIMEOUT_MS ?? 110_000);
-const cwd = process.env.AGENT_CWD ?? process.cwd();
-const STREAMING = process.env.AGENT_ASK_STREAM === "1";
-// One file is the whole of the client-side state: the id of the session to resume next time. It
-// lives beside the sessions it names so it is on the same store, and a container whose disk was
-// cleared simply finds nothing there and makes a new session — which is the intended reset.
-const SESSION_FILE = process.env.AGENT_SESSION_FILE ?? `${cwd}/.acp-agent-session`;
 
-/**
- * One newline-delimited JSON frame on stdout, in stream mode only.
- *
- * NAMED `emit`, NOT `frame`, ON PURPOSE. The stdout reader below binds the parsed JSON of each line to
- * a local `frame`, and a `let frame` in that block shadows an outer `frame` for the whole block — so
- * calling the helper from inside the reader threw `TypeError: frame is not a function` on the first
- * assistant chunk, which is to say it failed at the exact moment there was a reply to stream.
- */
+const STREAMING = process.env.AGENT_ASK_STREAM === "1";
+const PROFILE = process.env.AGENT_PROFILE ?? "headless";
+const cwd = process.env.AGENT_CWD ?? process.cwd();
+
+// Named `emit`, not `frame`, because the stdout reader below binds a local `frame` and would shadow it.
 const emit = (value) => {
   if (STREAMING) process.stdout.write(JSON.stringify(value) + "\n");
 };
 
-const readSavedSession = () => {
-  try { return readFileSync(SESSION_FILE, "utf8").trim() || null; } catch { return null; }
-};
-const saveSession = (id) => {
-  try { writeFileSync(SESSION_FILE, id + "\n"); } catch { /* unwritable is not fatal: next call makes a new session */ }
-};
-const forgetSession = () => {
-  try { unlinkSync(SESSION_FILE); } catch { /* absent is the state we wanted */ }
-};
+// Bounded, because this runs inside a request that already has a deadline.
+const DEADLINE_MS = Number(process.env.AGENT_ASK_TIMEOUT_MS ?? 110_000);
 
-const child = spawn("dsh", ["--profile", process.env.AGENT_PROFILE ?? "acp"], {
+const child = spawn("dsh", ["--profile", PROFILE, prompt], {
   cwd,
-  stdio: ["pipe", "pipe", "inherit"],   // stderr inherits: diagnostics never touch stdout
+  stdio: ["ignore", "pipe", "inherit"], // stderr inherits: reasoning and diagnostics never reach stdout
 });
 
-let buffer = "";
-let sessionId = null;
 let reply = "";
-let stopReason = null;
-let id = 1;
-const pending = new Map();
-let lastFrameAt = Date.now();
-
-const send = (method, params) => {
-  const thisId = id++;
-  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: thisId, method, params }) + "\n");
-  return new Promise((resolve, reject) => pending.set(thisId, { resolve, reject, method }));
-};
+let lastOutputAt = Date.now();
 
 child.stdout.on("data", (chunk) => {
-  buffer += chunk.toString();
-  let nl;
-  while ((nl = buffer.indexOf("\n")) !== -1) {
-    const line = buffer.slice(0, nl).trim();
-    buffer = buffer.slice(nl + 1);
-    if (!line) continue;
-    let frame;
-    try { frame = JSON.parse(line); } catch { continue; }   // a non-frame line is not an answer
-    lastFrameAt = Date.now();
-    if (frame.id !== undefined && pending.has(frame.id)) {
-      const { resolve, reject, method } = pending.get(frame.id);
-      pending.delete(frame.id);
-      if (frame.error) {
-        // The ACP error's `data` is where the harness puts the real reason - a stack, a provider
-        // name, a path. Reporting the bare `message` is what turned a container-side failure into
-        // the single word "Internal error" and cost a round trip through the Worker to even see it.
-        const detail = frame.error.data === undefined ? "" : ` ${JSON.stringify(frame.error.data)}`;
-        reject(new Error(`${method}: ${frame.error.message}${detail}`));
-      } else resolve(frame.result);
-      continue;
-    }
-    const update = frame?.params?.update;
-    if (!update) continue;
-    if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text") {
-      reply += update.content.text;
-      emit({ type: "chunk", text: update.content.text });
-    }
-    if (update.sessionUpdate === "usage_update") {
-      process.stderr.write(`[usage ${update.used}/${update.size}]\n`);
-    }
-  }
+  lastOutputAt = Date.now();
+  const text = chunk.toString();
+  reply += text;
+  emit({ type: "chunk", text });
 });
-
-child.on("exit", (code) => {
-  // EOF or an exit with the reply in hand is the normal end; a bare exit is a failure to report.
-  if (reply && !stopReason) { finish(0); return; }
-  finish(code === 0 && reply ? 0 : 1);
-});
-child.on("error", (e) => { process.stderr.write(`[spawn: ${e.message}]\n`); finish(1); });
 
 let done = false;
 let lastError = null;
+
 function finish(code) {
   if (done) return;
   done = true;
+  const text = reply.trim();
   if (STREAMING) {
-    // `done` repeats the whole reply even though `chunk` frames already carried it, so a consumer
-    // that joined late or missed a frame still ends with the complete answer rather than a prefix.
+    // `done` repeats the whole reply so a consumer that joined late still ends with the full answer.
     emit(
-      code === 0 && reply
-        ? { type: "done", stopReason, text: reply.trim() }
-        : { type: "error", message: lastError ?? `no reply (stopReason ${stopReason ?? "unknown"})` },
+      code === 0 && text
+        ? { type: "done", stopReason: "end_turn", text }
+        : { type: "error", message: lastError ?? `no reply (exit ${code})` },
     );
-  } else if (code === 0 && reply) {
-    process.stdout.write(reply.trim() + "\n");
+  } else if (code === 0 && text) {
+    process.stdout.write(text + "\n");
   }
   process.exit(code);
 }
 
+child.on("error", (error) => {
+  lastError = `spawn: ${error.message}`;
+  process.stderr.write(`[spawn: ${error.message}]\n`);
+  finish(1);
+});
+
+child.on("exit", (code) => {
+  if (code === 0 && reply.trim()) {
+    finish(0);
+    return;
+  }
+  if (!lastError) lastError = `dsh --profile ${PROFILE} exited ${code} without a reply`;
+  finish(code === 0 ? 1 : code ?? 1);
+});
+
 const watchdog = setInterval(() => {
-  if (Date.now() - lastFrameAt > DEADLINE_MS) {
-    process.stderr.write(`[no frames for ${DEADLINE_MS}ms, giving up]\n`);
+  if (Date.now() - lastOutputAt > DEADLINE_MS) {
+    process.stderr.write(`[no output for ${DEADLINE_MS}ms, giving up]\n`);
+    lastError = `no output for ${DEADLINE_MS}ms`;
     child.kill("SIGKILL");
     clearInterval(watchdog);
     finish(1);
   }
 }, 2000);
-
-/**
- * Resume the saved session, or make one.
- *
- * A resume that is rejected — the session was deleted, or its cwd moved — is a stale id, not a
- * broken prompt, so the id is dropped and a fresh session takes its place. Everything else is left
- * alone: a resume refused for any other reason is reported, because guessing would hide it.
- */
-async function openSession() {
-  const saved = readSavedSession();
-  if (saved) {
-    try {
-      await send("session/resume", { sessionId: saved, cwd, mcpServers: [] });
-      process.stderr.write(`[resumed ${saved}]\n`);
-      emit({ type: "session", sessionId: saved, resumed: true });
-      return saved;
-    } catch (e) {
-      process.stderr.write(`[resume of ${saved} refused: ${e.message}; making a new session]\n`);
-      forgetSession();
-    }
-  }
-  const created = await send("session/new", { cwd, mcpServers: [] });
-  saveSession(created.sessionId);
-  process.stderr.write(`[session ${created.sessionId}]\n`);
-  emit({ type: "session", sessionId: created.sessionId, resumed: false });
-  return created.sessionId;
-}
-
-try {
-  await send("initialize", {
-    protocolVersion: 1,
-    clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-  });
-  sessionId = await openSession();
-  const result = await send("session/prompt", {
-    sessionId,
-    prompt: [{ type: "text", text: prompt }],
-  });
-  stopReason = result?.stopReason ?? "unknown";
-  process.stderr.write(`[stop ${stopReason}]\n`);
-  clearInterval(watchdog);
-  // `end_turn` is the model having answered. Anything else — max_tokens, refusal, error — is not a
-  // reply, and reporting it as one would let a truncated answer look like a complete one.
-  finish(stopReason === "end_turn" && reply ? 0 : 1);
-} catch (e) {
-  lastError = e.message;
-  process.stderr.write(`[error: ${e.message}]\n`);
-  clearInterval(watchdog);
-  try { child.kill("SIGKILL"); } catch { /* gone */ }
-  finish(1);
-}

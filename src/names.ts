@@ -70,7 +70,7 @@ export const ROUTE_TERMINAL = "/ws/terminal";
  * that gate rather than adding a second one.
  */
 export const ROUTE_AGENT = "/agent";
-export const ROUTE_AGENT_PROFILE = "acp";
+export const ROUTE_AGENT_PROFILE = "headless";
 // Seconds on the wire for a single model turn; long enough for a real reply, bounded so a hung
 // session cannot pin an open request for ever.
 export const ROUTE_AGENT_TIMEOUT_MS = 120000;
@@ -99,6 +99,19 @@ export const TERMINAL_SHELL = "dsh-session";
  */
 export const DSH_HOME_PATH = "/root/.dsh";
 export const DSH_HOME_ENV = "DSH_HOME";
+
+/**
+ * Where the agent route writes the prompt it is about to answer.
+ *
+ * A FILE, BECAUSE A COMMAND LINE IS CODE. The route used to interpolate `JSON.stringify(prompt)` into
+ * a shell command, and inside double quotes the shell still expands `$(...)` and backticks - so a
+ * prompt could execute in the container, on the one route that exists so that no request field can
+ * reach argv. A fixed path keeps every request-derived byte out of the shell.
+ *
+ * Constant rather than per-request on purpose: this surface answers one turn at a time, and a
+ * predictable path is one fewer thing to leak or accumulate.
+ */
+export const AGENT_PROMPT_PATH = "/tmp/dsh-agent-prompt.txt";
 /**
  * There is no auth constant here, and that is the point.
  *

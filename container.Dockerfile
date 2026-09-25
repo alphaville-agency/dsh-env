@@ -174,6 +174,24 @@ RUN dsh plugin --profile acp add "${DSH_TUI_BUNDLE}" @deepseek-ai/dsh-acp-app \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
+# THE HEADLESS PROFILE: one task in, one reply out, and no protocol in between.
+#
+# `dsh --profile headless "task"` prints the final assistant message on stdout, streams its reasoning
+# to stderr and exits - a control surface with nothing to get wrong: no handshake, no session
+# negotiation, no client. It is here because the ACP profile, over this same base tree, stalls in
+# `session/new` inside this container: the request is accepted and then no frame is emitted for
+# minutes, while the TUI answers normally over the same settings, provider and session store. That
+# the TUI works is the whole argument - it proves the model route and agent creation are fine here, so
+# the stall belongs to the ACP application, and this is the surface that does not depend on it.
+#
+# dsh-base is named explicitly: `dsh plugin add` records the bundle it is given, and the headless
+# application is a layer OVER the base tree rather than a replacement for it.
+RUN dsh plugin --profile headless add @deepseek-ai/dsh-base @deepseek-ai/dsh-headless \
+ && node -e "const f='/root/.dsh/profiles/headless/package.json';const fs=require('fs');const d=JSON.parse(fs.readFileSync(f,'utf8'));d.dsh.profile.patchReload='startup';fs.writeFileSync(f,JSON.stringify(d,null,2)+'\n')" \
+ && node -e "const d=require('/root/.dsh/profiles/headless/package.json');if(d.dsh.profile.patchReload!=='startup'){throw new Error('patchReload was not set')}" \
+ && npm cache clean --force \
+ && rm -rf /root/.npm
+
 # Turn OFF live patch reloading, which is a laptop feature and cannot work here.
 #
 # `dsh plugin add` writes `patchReload: "live"`, the default for a custom profile, and live reload
@@ -271,7 +289,9 @@ RUN test -f /root/.dsh/AGENTS.md \
 # longest on, and it costs nothing to catch here instead of in a session.
 RUN command -v dsh \
  && dsh --version \
- && test -d /root/.dsh/profiles/dsh-tui/node_modules/@deepseek-harness-tui/dsh-tui
+ && test -d /root/.dsh/profiles/dsh-tui/node_modules/@deepseek-harness-tui/dsh-tui \
+ && test -d /root/.dsh/profiles/headless \
+ && node -e "const d=require('/root/.dsh/profiles/headless/package.json');const b=d.dsh.profile.bundles;if(!b.includes('@deepseek-ai/dsh-headless')){throw new Error('the headless bundle is missing from the profile: '+b.join(','))}"
 
 # THE TOOLCHAIN CHECK, AT THE END - deliberately, because that is where every installer has finished.
 # It failed once by being placed before gh (a tarball install at line ~128), which taught the rule it

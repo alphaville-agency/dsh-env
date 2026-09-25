@@ -57,6 +57,7 @@ import {
   STATE_MOUNT_PATH,
   STATE_MOUNT_TIMEOUT_MS,
   STATE_PROBE_TIMEOUT_MS,
+  AGENT_PROMPT_PATH,
   DSH_HOME_PATH,
   DSH_HOME_ENV,
   TERMINAL_SHELL,
@@ -373,11 +374,17 @@ async function agent(sandbox: Sandbox, request: Request, env: Env): Promise<Resp
   }
 
   const started = Date.now();
-  // The prompt travels as an ARGUMENT to a fixed script, never as a command. `agent-ask.mjs` does
-  // the ACP handshake (initialize, session/new, session/prompt), prints ONLY the reply on stdout and
-  // its diagnostics on stderr, so what comes back here is the model's answer and not a log line.
+  // THE PROMPT IS A FILE, NOT AN ARGUMENT, AND THAT IS A SECURITY PROPERTY.
+  //
+  // The previous version interpolated `JSON.stringify(prompt)` into a shell command line. Inside
+  // double quotes the shell still performs command substitution, so a prompt containing `$(...)` or
+  // backticks executed in the container - on a route that exists precisely so no request field can
+  // reach argv. Writing it to a fixed path and letting the script read it removes the shell from the
+  // path entirely: the only thing interpolated here is a constant.
+  await sandbox.writeFile(AGENT_PROMPT_PATH, prompt);
   const result = await sandbox.exec(
-    `AGENT_PROFILE=${ROUTE_AGENT_PROFILE} node /usr/local/bin/agent-ask ${JSON.stringify(prompt)}`,
+    `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
+      `node /usr/local/bin/agent-ask`,
     { timeout: ROUTE_AGENT_TIMEOUT_MS, env: agentEnv(env) },
   );
   const stdout = (result.stdout ?? "").trim();
@@ -445,6 +452,9 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
     }
 
     send({ type: "started" });
+    // Same reason as the POST route: the prompt goes to a file so nothing request-derived is ever
+    // placed on a command line.
+    await sandbox.writeFile(AGENT_PROMPT_PATH, prompt);
     let partial = "";
     // Each container stdout line is one JSON frame from `agent-ask`, forwarded as its own socket
     // message. A chunk boundary can split a line, so the remainder is kept until its newline lands.
@@ -460,8 +470,8 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
 
     try {
       const result = await sandbox.exec(
-        `AGENT_PROFILE=${ROUTE_AGENT_PROFILE} AGENT_ASK_STREAM=1 ` +
-          `node /usr/local/bin/agent-ask ${JSON.stringify(prompt)}`,
+        `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
+          `AGENT_ASK_STREAM=1 node /usr/local/bin/agent-ask`,
         {
           timeout: ROUTE_AGENT_TIMEOUT_MS,
           env: agentEnv(env),
