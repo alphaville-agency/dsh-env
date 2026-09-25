@@ -84,6 +84,12 @@ describe("container.Dockerfile: every COPY source exists in the repository", () 
       // container boots a launcher with no profile to run.
       "dsh-profile/settings.yaml",
       "dsh-profile/cordis.patch.yml",
+      // The automation profile's patch layer. The container is driven over ACP (Agent Client
+      // Protocol) as well as the terminal, and that profile must be on our gateway route rather than
+      // the deepseek-official row the shipped bundle carries — a control surface pointed at another
+      // account cannot see the work. Without this COPY the image boots `dsh --profile acp` against
+      // the wrong provider.
+      "dsh-profile/acp-cordis.patch.yml",
       // One program on PATH that boots the TUI on that profile, because the terminal route passes a
       // single program name rather than a command with arguments.
       "bin/dsh-session",

@@ -152,6 +152,22 @@ RUN dsh plugin --profile dsh-tui add "${DSH_TUI_BUNDLE}" \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
+# THE ACP PROFILE: a second, automation-only surface for the same session.
+#
+# `dsh --profile acp` speaks the Agent Client Protocol over stdio - prompt, stream the reply,
+# close - which is how this session is driven programmatically. It is a SEPARATE profile from
+# dsh-tui because they are different compositions: acp brings @deepseek-ai/dsh-acp-app (automation)
+# over the same dsh-base tree, so it has the same model route, the same settings and the same
+# persistence root. Same tree, second door.
+#
+# dsh-acp-app is in dsh-install's pinned manifest, so `dsh plugin add` resolves it without fetching
+# anything new, and the patch layer below pins the provider row to cf-ai-gateway the same way the
+# TUI's row is pinned - because the shipped acp-app row says deepseek-official, and a control surface
+# on the wrong account is a control surface that cannot see the work.
+RUN dsh plugin --profile acp add "${DSH_TUI_BUNDLE}" @deepseek-ai/dsh-acp-app \
+ && npm cache clean --force \
+ && rm -rf /root/.npm
+
 # Turn OFF live patch reloading, which is a laptop feature and cannot work here.
 #
 # `dsh plugin add` writes `patchReload: "live"`, the default for a custom profile, and live reload
@@ -170,6 +186,7 @@ RUN node -e "const f='/root/.dsh/profiles/dsh-tui/package.json';const fs=require
 # It routes subagent children to a worker model instead of inheriting the parent route, which is a
 # cost and quality decision rather than a default - see the file itself.
 COPY dsh-profile/cordis.patch.yml /root/.dsh/profiles/dsh-tui/cordis.patch.yml
+COPY dsh-profile/acp-cordis.patch.yml /root/.dsh/profiles/acp/cordis.patch.yml
 
 # The agent's own configuration, which is what turns a shell with a model into a place that knows how
 # this project works.

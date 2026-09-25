@@ -1,0 +1,17 @@
+{
+  "name": "dsh-profile-acp",
+  "private": true,
+  "dependencies": {
+    "@deepseek-harness-tui/dsh-tui": "0.10.1"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-harness-tui/dsh-tui",
+        "@deepseek-ai/dsh-acp-app"
+      ],
+      "patchReload": "startup"
+    }
+  }
+}
