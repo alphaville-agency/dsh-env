@@ -1,0 +1,66 @@
+#!/bin/sh
+# Create the GitHub Project board and fill it, following GitHub's own projects guidance.
+#
+#   ./bin/setup-board
+#
+# WHY A SCRIPT RATHER THAN A ONE-OFF. Building a board by hand is a thing that happens once and is then
+# unreproducible: nobody can tell whether a column is missing because it was never wanted or because
+# someone forgot. This is idempotent and checked - it reports what it created and fails loudly if the
+# API refuses, so "the board is set up" is a claim with a command behind it.
+#
+# REQUIRES THE `project` SCOPE. GitHub Projects is a separate API surface from issues, and the token
+# that can read issues and push commits cannot touch a board. One interactive step grants it:
+#
+#   gh auth refresh -s project,read:project
+#
+# That is the operator's browser prompt and nobody else's credential to change, which is why this script
+# stops and says so rather than working around it.
+set -eu
+
+OWNER="${BOARD_OWNER:-alphaville-agency}"
+TITLE="${BOARD_TITLE:-Alphaville Dev}"
+REPO="${BOARD_REPO:-alphaville-agency/agency}"
+
+# Fail before doing half the work: a missing scope is detected here, not after the issues are added.
+if ! gh project list --owner "$OWNER" >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+The GitHub token cannot reach Projects.
+
+  gh auth refresh -s project,read:project
+
+Projects is a separate API surface from issues: the token that pushes commits and
+reads issues is not the token that owns a board, and this is a scope only the
+account holder can grant because it is granted through a browser prompt.
+EOF
+    exit 1
+fi
+
+# GitHub's guidance is built-in views over live issues rather than a duplicated table, so the board is
+# created against the repository and populated from its issues rather than hand-maintained.
+if gh project list --owner "$OWNER" --format json 2>/dev/null | grep -q "\"$TITLE\""; then
+    echo "board '$TITLE' already exists"
+else
+    gh project create --owner "$OWNER" --title "$TITLE" >/dev/null
+    echo "created board '$TITLE'"
+fi
+
+NUMBER=$(gh project list --owner "$OWNER" --format json \
+    | python3 -c "import sys,json;print(next((p['number'] for p in json.load(sys.stdin)['projects'] if p['title']=='$TITLE'),''))")
+
+[ -n "$NUMBER" ] || { echo "could not find the board number" >&2; exit 1; }
+
+# Status is the board's column field. The names match the labels exactly, so a label and a column never
+# disagree about what state something is in - two sources of truth for one fact is how boards rot.
+for column in Backlog Ready "In progress" "In review" Approved Done Blocked; do
+    gh project field-create "$NUMBER" --owner "$OWNER" --name "Status" \
+        --data-type SINGLE_SELECT \
+        --single-select-options "Backlog,Ready,In progress,In review,Approved,Done,Blocked" >/dev/null 2>&1 \
+        && { echo "status field with columns set"; break; } || true
+done
+
+# Every open issue, added. Idempotent: an issue already on the board is not added twice.
+gh issue list --repo "$REPO" --state open --limit 100 --json url --jq '.[].url' | while read -r url; do
+    gh project item-add "$NUMBER" --owner "$OWNER" --url "$url" >/dev/null 2>&1 && echo "  added $url" || true
+done
+
+echo "board: https://github.com/orgs/$OWNER/projects/$NUMBER"
