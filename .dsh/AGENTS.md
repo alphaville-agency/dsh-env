@@ -1,12 +1,35 @@
 # DSH shared agent instructions
 
-For any Plane-related task, invoke the `plane` skill. It is installed in the shared catalog at
-`~/.agents/skills/plane/`, alongside every other skill, and the harness discovers it natively —
-there is no separate per-agent location and no absolute path to remember.
+**GitHub is the system of record for this environment's own work.** Specs, features, bugs, ideas and
+progress live in GitHub Issues in the relevant repository, with kanban state carried by labels:
+`backlog` → `inbox` (routed to `dev-inbox` / `agency-inbox` / `operator-inbox`) → `spec` → `ready` →
+`in-progress` → `in-review` → `approved`, plus `blocked`. Documentation types are labels too: `adr`,
+`rfc`, `rfp`, `decision`, `handoff`.
 
-This applies to DSH DeepSeek sessions, including the TUI and web profiles, subagents, and CLI-backed harnesses. Follow the skill's CLI-first workspace resolution, project setup, workflow, attribution, and verification rules. Load `references/cli-reference.md` only when the requested operation needs detailed command or workflow guidance.
+One tool, not two. GitHub was chosen over Plane on a concrete fact rather than a preference: `gh` is
+already authenticated in this container and works, whereas Plane needs another live credential before a
+loop can read a single requirement — and a loop that cannot read its plan is the knee-jerk the process
+exists to prevent. The `plane` skill remains installed if a task genuinely concerns Plane; it is no
+longer the default.
 
-For model routing, read and follow `MODEL-ROLES.md`: deepseek-v4.1-flash orchestrates, gpt-5.6-luna performs worker tasks, and gpt-5.6-sol provides final authority and Sprint review/advice.
+**Each party checks its own inbox.** `dev-inbox` is the dev environment's, `agency-inbox` is the
+agency's, `operator-inbox` is the operator's. Nobody routes work by telling someone in a message: the
+label is the routing, and reading your own inbox is the responsibility that comes with it.
+
+**Specification is an artifact and it comes first.** Every item carries `docs/specs/<issue>/` with
+`PRD.md` (what problem, for whom, what done looks like), `ARD.md` (architecture, boundaries, and what we
+are deliberately not doing), `DLD.md` (schemas, interfaces, failure modes) and `EVIDENCE.md` (commands
+and their real output — "it works" is not evidence). The spec is merged as its own pull request before
+implementation starts. A design that lives only in a turn dies with the turn, which this environment has
+watched happen.
+
+**The full process is `docs/DEV-LOOP.md`** — branching, the three review gates that each leave comments,
+and the merge rule. Read it before starting work; it is the pattern, not a suggestion.
+
+**This environment's process is NOT the agency's internal specification structure.** They are different
+things with different owners: this is how the dev environment manages its own work; the agency's
+internal specs live with the agency. Do not copy one into the other.
+
 
 ## Design rule: just works first, complexity is progressive and opt-in
 Full text: [`rules/design-ladder.md`](rules/design-ladder.md) — read it before designing a config, a default, or an optional feature.
