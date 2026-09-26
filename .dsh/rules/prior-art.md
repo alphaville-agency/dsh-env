@@ -69,3 +69,35 @@ is the primary discovery tool and needs no setup.
 **Cite what you find.** Naming the project, the package, or the standard you followed — and saying why
 you did not use it if you did not — is the deliverable. "I searched and found nothing" is only
 acceptable with the commands you ran printed next to it.
+
+
+### Search the way that actually finds prior art
+
+An unqualified `gh search repos "<phrase>"` returns almost nothing, because it is matching a phrase
+against names and descriptions. The field is found by searching the CONCEPT, ranked, and filtered —
+and by looking in the languages this project uses:
+
+```sh
+# The established projects for a concept, ranked by stars. `--sort stars` is the point.
+gh search repos "double entry ledger" --sort stars --limit 20 \
+  --json fullName,stargazersCount,updatedAt,language,description
+
+# The same idea per language this project uses. Run it more than once.
+gh search repos "ledger" --language typescript --sort stars --limit 20 --json fullName,stargazersCount,updatedAt
+gh search repos "ledger" --language python     --sort stars --limit 20 --json fullName,stargazersCount,updatedAt
+gh search repos "event sourcing" --language typescript --sort stars --limit 20 --json fullName,stargazersCount,updatedAt
+
+# Actively maintained, not merely popular: `pushed:>` is the filter that matters.
+gh search repos "ledger" --sort updated --limit 20 --json fullName,stargazersCount,updatedAt
+
+# What people file against it, which tells you where it hurts.
+gh search issues --repo <owner/name> --limit 10 --json title,state
+```
+
+Judge on **stars for adoption and `updatedAt` for whether it is alive** — a 4k-star project last
+pushed three years ago is a museum piece, not prior art. Read the README of the top two or three with
+`web_fetch`, and say which you are following and which you are deliberately not, with the reason.
+
+**A single unqualified search is not a search.** If the first query returns "few results", that is
+information about the query, not about the field: change the term, the language, or the sort, and run
+it again before concluding there is nothing to find.
