@@ -57,11 +57,14 @@ const emit = (value) => {
 };
 
 // Bounded, because this runs inside a request that already has a deadline.
-const DEADLINE_MS = Number(process.env.AGENT_ASK_TIMEOUT_MS ?? 110_000);
+// Inactivity, not duration: a turn that is still printing is still working. The Worker passes its own
+// budget minus a margin, so the script gives up just before the route's own timeout does.
+const DEADLINE_MS = Number(process.env.AGENT_ASK_TIMEOUT_MS ?? 240_000);
 
 const child = spawn("dsh", ["--profile", PROFILE, prompt], {
   cwd,
-  stdio: ["ignore", "pipe", "inherit"], // stderr inherits: reasoning and diagnostics never reach stdout
+  // stderr is PIPED rather than inherited, for the reason below.
+  stdio: ["ignore", "pipe", "pipe"],
 });
 
 let reply = "";
@@ -72,6 +75,20 @@ child.stdout.on("data", (chunk) => {
   const text = chunk.toString();
   reply += text;
   emit({ type: "chunk", text });
+});
+
+// STDERR IS ACTIVITY, AND TREATING IT AS SILENCE COST A WHOLE TURN.
+//
+// The watchdog used to watch stdout only, and `dsh --profile headless` prints the reply to stdout but
+// streams its REASONING AND EVERY TOOL CALL to stderr. A working turn therefore looked like a dead one:
+// measured on the first real goal turn, the session was 35 reasoning lines deep, reading the
+// repository and checking credentials, and was killed at 110s with
+// `[no output for 110000ms, giving up]` - nothing wrong with the turn, only with what was being
+// watched. stderr is forwarded to our own stderr so it stays a diagnostic rather than becoming part
+// of the reply, and it now counts as the process being alive.
+child.stderr.on("data", (chunk) => {
+  lastOutputAt = Date.now();
+  process.stderr.write(chunk);
 });
 
 let done = false;

@@ -432,6 +432,7 @@ async function agent(sandbox: Sandbox, request: Request, env: Env): Promise<Resp
     PRIME_COMMAND +
       `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
       `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
+      `AGENT_ASK_TIMEOUT_MS=${ROUTE_AGENT_TIMEOUT_MS - 15_000} ` +
       `node /usr/local/bin/agent-ask`,
     { timeout: ROUTE_AGENT_TIMEOUT_MS, env: agentEnv(env) },
   );
@@ -519,6 +520,7 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
         PRIME_COMMAND +
           `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
           `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
+          `AGENT_ASK_TIMEOUT_MS=${ROUTE_AGENT_TIMEOUT_MS - 15_000} ` +
           `AGENT_ASK_STREAM=1 node /usr/local/bin/agent-ask`,
         {
           timeout: ROUTE_AGENT_TIMEOUT_MS,
