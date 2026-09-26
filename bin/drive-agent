@@ -1,0 +1,23 @@
+#!/bin/sh
+# Drive the remote agent surface and leave the transcript on a stable path.
+#
+#   ./bin/drive-agent "<prompt>"        one turn
+#   ./bin/drive-agent --file PROMPT     one turn, prompt from a file
+#
+# The transcript is always /tmp/alphaville-run.log, and /tmp/alphaville-run-head.log points at the
+# newest one, so `tail -f /tmp/alphaville-run-head.log` works between runs without knowing a filename.
+# Per-run copies are kept as /tmp/alphaville-run.<epoch>.log.
+set -eu
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+STAMP=$(date +%s)
+LOG="/tmp/alphaville-run.$STAMP.log"
+ln -sfn "$LOG" /tmp/alphaville-run-head.log
+if [ "${1:-}" = "--file" ]; then
+    PROMPT_FILE="$2"
+else
+    printf '%s' "$*" > "/tmp/alphaville-prompt.$STAMP.txt"
+    PROMPT_FILE="/tmp/alphaville-prompt.$STAMP.txt"
+fi
+echo "[transcript: $LOG]" >&2
+echo "[live:       tail -f /tmp/alphaville-run-head.log]" >&2
+node "$SELF_DIR/drive-agent.mjs" "$PROMPT_FILE" 2>&1 | tee "$LOG"
