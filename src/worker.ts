@@ -48,6 +48,7 @@ import {
   ROUTES_FIELD,
   ROUTE_FIELD,
   ROUTE_AGENT,
+  LOOP_TICK_PROMPT,
   ROUTE_AGENT_PROFILE,
   ROUTE_AGENT_TIMEOUT_MS,
   ROUTE_HEALTHZ,
@@ -676,6 +677,50 @@ async function terminal(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
+  /**
+   * The loop's scheduled tick — a Cloudflare Cron Trigger, not a container daemon.
+   *
+   * WHY THIS SHAPE. The shared rules forbid a poll or keepalive inside the container: a loop there
+   * converts "cost while I work" into "cost while I live". The platform's native scheduler runs this
+   * Worker on a schedule with no container up, and only the turn it drives starts one. So the tick
+   * arrives here, drives the ONE existing bounded surface (`agent()`), and the container sleeps again
+   * when the turn ends.
+   *
+   * THE PROMPT IS `LOOP_TICK_PROMPT`, which carries the decide-before-you-execute sequence from
+   * `docs/DEV-LOOP.md` §5. The tick does not decide anything itself — it hands the session the same
+   * prompt an operator would, so the loop's rules are the process document's, not a second copy that
+   * can drift from it.
+   *
+   * FAILURES ARE LOGGED, NEVER THROWN. A scheduled handler that throws retries on the platform's
+   * schedule, and a tick that cannot reach the container should not spin: one logged failure is the
+   * honest result, and the next tick in thirty minutes tries again.
+   */
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        const sandbox = sandboxFor(env);
+        try {
+          await injectSecrets(sandbox, env);
+          const request = new Request("https://internal/agent", {
+            method: METHOD_POST,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ prompt: LOOP_TICK_PROMPT }),
+          });
+          const response = await agent(sandbox, request, env);
+          const body = await response.text();
+          console.log(
+            `dsh: loop tick ${event.cron} finished (HTTP ${response.status}): ${body.slice(0, 400)}`,
+          );
+        } catch (error) {
+          console.log(
+            `dsh: loop tick ${event.cron} failed: ${describeError(error)}. The next tick retries; ` +
+              `one failure is logged rather than retried here, so a broken tick cannot spin.`,
+          );
+        }
+      })(),
+    );
+  },
+
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 

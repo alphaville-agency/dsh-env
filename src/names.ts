@@ -70,6 +70,42 @@ export const ROUTE_TERMINAL = "/ws/terminal";
  * that gate rather than adding a second one.
  */
 export const ROUTE_AGENT = "/agent";
+
+/**
+ * The loop's wake prompt, and the schedule that fires it.
+ *
+ * WHY A CRON TRIGGER AND NOT A CONTAINER DAEMON. The shared rules forbid a poll, a loop or a
+ * keepalive inside the container — "a loop like that converts cost while I work into cost while I
+ * live". The design in `docs/DEV-LOOP.md` names the wake as "a scheduled tick", and the platform's
+ * native scheduler is a Cloudflare Cron Trigger, which runs Worker code on a schedule with no
+ * container involved until the turn actually starts. So the tick lives here, in the Worker, and the
+ * container is woken only for the turn it is given.
+ *
+ * The prompt is the DECIDE-BEFORE-YOU-EXECUTE sequence from `docs/DEV-LOOP.md` §5, verbatim in
+ * intent: read intake, decide whether it changes the plan, then work at most one `ready` item. A wake
+ * that edits code before step 2 is the failure mode that file exists to prevent, so the prompt says so
+ * in its first breath rather than trusting the session to remember it.
+ */
+export const LOOP_TICK_PROMPT =
+  "This is a scheduled loop tick. Follow docs/DEV-LOOP.md section 5 EXACTLY, in order: " +
+  "(1) READ INTAKE first — list open issues in alphaville-agency/agency with `gh issue list`, note any " +
+  "in dev-inbox/operator-inbox and any PR comments. (2) DECIDE, DO NOT EXECUTE YET — is anything here a " +
+  "change to the plan? If so create or update the issue, or reject it with the reason on the issue. " +
+  "(3) Only if an issue is labelled `ready`, work EXACTLY ONE of them to its acceptance criteria on a " +
+  "branch named for it, writing its SpecKit spec first if the spec is not merged yet. (4) Push, open a " +
+  "PR if there is code, and record what you did as a comment on the issue. (5) If nothing is `ready`, " +
+  "say so briefly and stop — do not invent work. Never edit code before step 2. Be efficient: reuse " +
+  "what you have read, do not re-read the same file twice, push early so a reset cannot lose it.";
+
+/**
+ * How often the loop ticks.
+ *
+ * Deliberately NOT every minute: each tick wakes the container, primes the workspace and spends a
+ * model turn, and the goal is efficiency — "fewer turns and fewer tokens to the same deliverable".
+ * Thirty minutes is a human-scale cadence for an autonomous dev loop that is not on fire, and it keeps
+ * a tick from overlapping the previous one's work. Raise it only with a reason.
+ */
+export const LOOP_TICK_CRON = "*/30 * * * *";
 export const ROUTE_AGENT_PROFILE = "headless";
 // How long one agent turn may run: fifteen minutes.
 //

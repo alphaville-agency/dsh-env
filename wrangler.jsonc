@@ -86,6 +86,14 @@
       "bucket_name": "af-shared-tooling-dsh"
     }
   ],
+  // The loop's wake. A Cron Trigger runs this Worker on a schedule with no container involved, which
+  // is the only scheduler the shared rules permit — a poll inside the container would convert "cost
+  // while I work" into "cost while I live". The handler in src/worker.ts drives one bounded turn and
+  // the container sleeps again. Cadence is `LOOP_TICK_CRON` in src/names.ts.
+  "triggers": {
+    "crons": ["*/30 * * * *"]
+  },
+
   "routes": [
     {
       "pattern": "dsh.alphaville.space",
