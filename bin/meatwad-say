@@ -65,6 +65,8 @@
 #
 # ENV
 #   MEATWAD_VOICE      voice name (default: Bubbles, a child voice)
+#   MEATWAD_PBAS       pitch offset in dB (default: -6, lowered)
+#   MEATWAD_RATE       words per minute (default: 138, 20% under the previous 172)
 #   MEATWAD_MAX_CHARS  spoken-length cap (default: 220)
 #   MEATWAD_RUNDIR     runtime dir (default: $TMPDIR/meatwad-say)
 
@@ -84,6 +86,13 @@ LOG="$RUNDIR/meatwad-say.log"
 MAX_CHARS=${MEATWAD_MAX_CHARS:-220}
 DEFAULT_VOICE=${MEATWAD_VOICE:-Bubbles}
 FALLBACK_VOICES="Bubbles Junior"
+# PITCH AND RATE ARE DATA, NOT HARDCODED. They were inline `[[pbas +22]] [[rate 172]]`, which meant
+# changing how this sounds meant editing code; a status voice is a preference, so they are knobs with
+# defaults. Defaults are the requested ones: pitch lowered, rate 20% under what it was.
+PBAS=${MEATWAD_PBAS:--6}
+RATE=${MEATWAD_RATE:-138}
+# Exported so the shaping process reads OUR values rather than its own defaults.
+export MEATWAD_PBAS="$PBAS" MEATWAD_RATE="$RATE"
 
 die_soft() {  # report a reason, never fail the turn
     printf 'meatwad-say: %s\n' "$1" >&2
@@ -266,8 +275,13 @@ if len(text) > cap:
     text = cut.rstrip(' ,;:') + ' ...'
 
 if not plain:
-    # Cadence, not just voice: a little higher and slower reads childlike.
-    text = '[[pbas +22]] [[rate 172]] ' + text
+    # PITCH AND RATE COME FROM THE ENVIRONMENT. The previous inline `[[pbas +22]] [[rate 172]]` fixed
+    # them at edit time; the operator asked for lower and 20% slower, and a preference that needs a
+    # commit to change is the wrong shape for one. Everything ELSE caller-supplied is still stripped
+    # above, so a message cannot steer the voice - only these two values can, and they are ours.
+    pbas = os.environ.get('MEATWAD_PBAS', '-6')
+    rate = os.environ.get('MEATWAD_RATE', '138')
+    text = f'[[pbas {pbas}]] [[rate {rate}]] ' + text
 print(text)
 PY
 )
