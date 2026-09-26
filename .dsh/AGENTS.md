@@ -24,6 +24,13 @@ is prior art rather than an invention: `github/spec-kit` is the established tool
 implementation starts, and a heavier model writes the formal documents from an initial draft. A design
 that lives only in a turn dies with the turn, which this environment has watched happen.
 
+**The board is used in anger, by every contributor, as the rule.** It is not a view someone
+maintains for the operator's benefit, and it is not optional for agents either: work that is not on the
+board did not happen, and a change that does not move an item's state was not finished. That applies
+equally to a person, to this environment, and to the agency — including work done "off the board" while
+someone was fixing something else. The board is the plan of record, the milestones are the roadmap, and
+both are read before starting and written before stopping.
+
 **The full process is `docs/DEV-LOOP.md`** — branching, the three review gates that each leave comments,
 and the merge rule. Read it before starting work; it is the pattern, not a suggestion.
 
