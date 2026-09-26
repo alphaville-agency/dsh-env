@@ -63,4 +63,12 @@ gh issue list --repo "$REPO" --state open --limit 100 --json url --jq '.[].url' 
     gh project item-add "$NUMBER" --owner "$OWNER" --url "$url" >/dev/null 2>&1 && echo "  added $url" || true
 done
 
-echo "board: https://github.com/orgs/$OWNER/projects/$NUMBER"
+# `/users/`, NOT `/orgs/`: alphaville-agency is a USER account, not an organization, and the orgs
+# path 404s on it. GitHub's own guide writes `/orgs/` because most projects live on orgs - a user
+# account's projects are under `/users/<login>/projects/<n>`. This is the kind of detail that makes a
+# link look correct and fail, which is the dangling-reference defect in a URL.
+case "$(gh api "/users/$OWNER" --jq .type 2>/dev/null)" in
+    Organization) owner_path="orgs" ;;
+    *)            owner_path="users" ;;
+esac
+echo "board: https://github.com/$owner_path/$OWNER/projects/$NUMBER"
