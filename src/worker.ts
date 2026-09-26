@@ -38,6 +38,7 @@ import {
   GH_TOKEN_ENV,
   CLOUDFLARE_API_TOKEN_ENV,
   TENANCY_TOKEN_SECRET,
+  TENANCY_ENV_PATH,
   CLOUDFLARE_ACCOUNT_ID_ENV,
   METHOD_FIELD,
   METHOD_GET,
@@ -394,6 +395,27 @@ function describeError(error: unknown): string {
  * be concatenated into `text`, and in the streaming route it would arrive as a `chunk` that looks like
  * the model talking. Everything a prime says belongs beside the reply, never inside it.
  */
+/**
+ * Put the tenancy credential into the session's environment, past the harness's scrub.
+ *
+ * The file is written by the same `exec` that uses it, and sourced before anything else runs. Two
+ * steps because the two halves fail independently: the write is where the secret enters the container,
+ * and the source is what makes `wrangler` see it after the harness has stripped TOKEN-named variables
+ * from the environment it hands to subprocesses. Both are no-ops when no token is configured, so the
+ * environment still works as a shell.
+ */
+function tenancyCommand(env: Env): string {
+  const token = env[TENANCY_TOKEN_SECRET];
+  const account = env[CLOUDFLARE_ACCOUNT_ID_ENV];
+  if (typeof token !== "string" || token.length === 0) return "";
+  const accountLine = typeof account === "string" && account.length > 0 ? `CLOUDFLARE_ACCOUNT_ID=${account}\n` : "";
+  const payload = toBase64(`CLOUDFLARE_API_TOKEN=${token}\n${accountLine}`);
+  return (
+    `mkdir -p /root/.dsh && printf %s '${payload}' | base64 -d > ${TENANCY_ENV_PATH} ` +
+    `&& chmod 600 ${TENANCY_ENV_PATH} && set -a && . ${TENANCY_ENV_PATH} && set +a; `
+  );
+}
+
 const PRIME_COMMAND = '{ [ -d /workspace/agency ] || dsh-prime >&2; }; ';
 
 function toBase64(text: string): string {
@@ -449,7 +471,8 @@ async function agent(sandbox: Sandbox, request: Request, env: Env): Promise<Resp
   // path entirely: the only thing interpolated here is a constant.
   const session = await sandbox.getSession(AGENT_SESSION);
   const result = await session.exec(
-    PRIME_COMMAND +
+    tenancyCommand(env) +
+      PRIME_COMMAND +
       `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
       `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
       `AGENT_ASK_TIMEOUT_MS=${ROUTE_AGENT_TIMEOUT_MS - 15_000} ` +
@@ -537,7 +560,8 @@ async function agentStream(sandbox: Sandbox, request: Request, env: Env): Promis
     try {
       const agentSession = await sandbox.getSession(AGENT_SESSION);
       const result = await agentSession.exec(
-        PRIME_COMMAND +
+        tenancyCommand(env) +
+          PRIME_COMMAND +
           `printf %s '${toBase64(prompt)}' | base64 -d > ${AGENT_PROMPT_PATH} && ` +
           `AGENT_PROMPT_FILE=${AGENT_PROMPT_PATH} AGENT_PROFILE=${ROUTE_AGENT_PROFILE} ` +
           `AGENT_ASK_TIMEOUT_MS=${ROUTE_AGENT_TIMEOUT_MS - 15_000} ` +

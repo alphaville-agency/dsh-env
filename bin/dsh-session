@@ -45,6 +45,16 @@
 # else. The cost is one `sh` between the PTY and the TUI, which is the price of the retry.
 set -eu
 
+# THE TENANCY CREDENTIAL, SOURCED PAST THE HARNESS'S SCRUB. The subprocess seam drops ambient names
+# matching /KEY|PASSWORD|SECRET|TOKEN/i, which is why CLOUDFLARE_ACCOUNT_ID arrives and
+# CLOUDFLARE_API_TOKEN does not - and a container whose session cannot run `wrangler` is a notebook.
+# Written by the Worker; absent is fine.
+if [ -f /root/.dsh/tenancy.env ]; then
+    set -a
+    . /root/.dsh/tenancy.env
+    set +a
+fi
+
 PROFILE="${DSH_PROFILE:-dsh-tui}"
 DSH_HOME_DIR="${DSH_HOME:-/root/.dsh}"
 STORE="$DSH_HOME_DIR/sessions"

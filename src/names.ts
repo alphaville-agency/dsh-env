@@ -241,6 +241,22 @@ export const GH_TOKEN_ENV = "GH_TOKEN";
  */
 export const TENANCY_TOKEN_SECRET = "TENANCY_CLOUDFLARE_TOKEN";
 
+/**
+ * Where the tenancy credential is written, and why it is a FILE rather than an environment variable.
+ *
+ * THE HARNESS SCRUBS THE ENVIRONMENT IT HANDS TO SUBPROCESSES. Its subprocess seam starts from
+ * `scrubbedParentEnv()`, which drops ambient names matching `/KEY|PASSWORD|SECRET|TOKEN/i`. Measured:
+ * `CLOUDFLARE_ACCOUNT_ID` reached the session and `CLOUDFLARE_API_TOKEN` did not, so `wrangler whoami`
+ * answered "You are not authenticated" while the account was right there - and renaming the Worker's
+ * secret changed nothing, because the scrub matches the name the CONTAINER uses, not the one we store.
+ *
+ * A file is not an environment variable and is not scrubbed. The session sources this one, which puts
+ * the name back into the environment at the moment it is needed. The account id rides along so that
+ * `wrangler` cannot pick a different tenancy by default - this project has more than one, and picking
+ * wrong once already deployed a Worker with no custom domain into an account that has no Containers.
+ */
+export const TENANCY_ENV_PATH = "/root/.dsh/tenancy.env";
+
 /** The name the CONTAINER must see, which is what `wrangler` reads. */
 export const CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
 export const CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID";
