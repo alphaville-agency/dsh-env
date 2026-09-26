@@ -255,3 +255,118 @@ export class Sandbox extends BaseSandbox<Env> {
     return this as unknown as Container;
   }
 }
+
+/**
+ * Restore captured uncommitted work into /workspace — the half that was missing.
+ *
+ * WHY THIS EXISTS. `captureUncommittedWork` has run on every stop for a long time: it writes
+ * `changes.patch`, `untracked.tar.gz.b64`, `HEAD` and `MANIFEST.txt` per repository into
+ * `dsh-work/<stamp>/`. And nothing ever read them back — a grep for any restore across `bin/` and
+ * `src/` found zero. The safety net caught the work and dropped it on the other side of the container
+ * restart, which is the failure the goal names exactly: a copy-out that never runs is the same as no
+ * persistence at all. The copy-out ran; the copy-IN did not exist.
+ *
+ * THE SHAPE MIRRORS THE CAPTURE, and must, because the two are a contract. The capture writes a
+ * binary diff (`git diff HEAD --binary`) and a base64 gzipped tar of untracked files; the restore
+ * applies both in that order to a freshly cloned repo. It runs on the Worker, not in the container,
+ * because R2 is a binding this process holds and the container has no key to reach it.
+ *
+ * NEWEST FIRST. Several stops may have captured; the most recent is the state that was true when the
+ * disk went away, and applying an older one on top would resurrect work that had already been
+ * superseded. So: list `dsh-work/`, take the newest prefix, and ignore the rest (they stay in R2 as a
+ * history, which costs nothing and has saved a recovery before).
+ *
+ * NEVER THROWS. Like the capture, this runs where a failure must not break the session: an
+ * unreachable bucket or a patch that does not apply is reported on the result and the container still
+ * boots with whatever the clone already has.
+ */
+export interface RestoredWork {
+  prefix: string | null;
+  repos: string[];
+  failures: string[];
+}
+
+export async function restoreCapturedWork(
+  sandbox: Container,
+  bucket: R2Bucket,
+): Promise<RestoredWork> {
+  const result: RestoredWork = { prefix: null, repos: [], failures: [] };
+
+  // Newest capture first. R2 list is not guaranteed in order, so sort the prefixes descending.
+  let prefixes: string[];
+  try {
+    const listed = await bucket.list({ prefix: "dsh-work/", delimiter: "/" });
+    prefixes = (listed.delimitedPrefixes ?? [])
+      .map((p) => p.replace(/^dsh-work\//, "").replace(/\/$/, ""))
+      .filter((p) => p.length > 0)
+      .sort()
+      .reverse();
+  } catch (error) {
+    result.failures.push(`could not list captured work: ${describe(error)}`);
+    return result;
+  }
+
+  if (prefixes.length === 0) return result; // nothing was ever captured: not a failure
+  const stamp = prefixes[0];
+  result.prefix = `dsh-work/${stamp}`;
+
+  // Which repositories the capture recorded, from its manifest — the manifest is the record of what
+  // was actually saved, and reading it avoids guessing from a directory listing.
+  const manifest = await bucket.get(`${result.prefix}/MANIFEST.txt`).catch(() => null);
+  if (manifest === null) {
+    result.failures.push(`no manifest at ${result.prefix}`);
+    return result;
+  }
+
+  const recorded = (await manifest.text())
+    .split("\n")
+    .find((line) => line.startsWith("Repositories with work:"))
+    ?.replace("Repositories with work:", "")
+    .trim() ?? "";
+  const repos = recorded === "none" ? [] : recorded.split(",").map((r) => r.trim()).filter(Boolean);
+
+  for (const repo of repos) {
+    const dir = `/workspace/${repo}`;
+    try {
+      // The clone must exist first; `dsh-prime` runs before this and creates it. If it is not there,
+      // there is nothing to apply to, and that is worth reporting rather than silently skipping.
+      const exists = await sandbox.exec(`test -d ${dir}/.git && echo yes || echo no`);
+      if (!exists.stdout.includes("yes")) {
+        result.failures.push(`${repo}: not cloned, so the capture could not be applied`);
+        continue;
+      }
+
+      // Tracked changes, then untracked files. Order matters: the patch may create directories the
+      // tarball then populates, and applying the tar first could leave the patch a path it rejects.
+      const patchObj = await bucket.get(`${result.prefix}/${repo}/changes.patch`).catch(() => null);
+      const patchText = patchObj === null ? "" : (await patchObj.text());
+      if (patchText.trim().length > 0) {
+        // `git apply` with `--3way` is deliberately NOT used: a capture that no longer applies cleanly
+        // is a conflict the operator should see, not something silently resolved into the wrong code.
+        const applied = await sandbox.exec(
+          `cd ${dir} && printf %s ${JSON.stringify(patchText)} | git apply --whitespace=nowarn - 2>&1 || true`,
+        );
+        const out = applied.stdout.trim();
+        if (out.length > 0) result.failures.push(`${repo}: git apply reported: ${out.slice(0, 200)}`);
+      }
+
+      const untrackedObj = await bucket
+        .get(`${result.prefix}/${repo}/untracked.tar.gz.b64`)
+        .catch(() => null);
+      const untrackedText = untrackedObj === null ? "" : (await untrackedObj.text());
+      if (untrackedText.trim().length > 0) {
+        const restored = await sandbox.exec(
+          `cd ${dir} && printf %s ${JSON.stringify(untrackedText.trim())} | base64 -d | tar -xzf - 2>&1 || true`,
+        );
+        const out = restored.stdout.trim();
+        if (out.length > 0) result.failures.push(`${repo}: untar reported: ${out.slice(0, 200)}`);
+      }
+
+      result.repos.push(repo);
+    } catch (error) {
+      result.failures.push(`${repo}: ${describe(error)}`);
+    }
+  }
+
+  return result;
+}

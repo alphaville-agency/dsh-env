@@ -72,6 +72,7 @@ import {
 } from "./names";
 import { getSandbox, type SandboxOptions } from "@cloudflare/sandbox";
 import type { Sandbox } from "./sandbox";
+import { restoreCapturedWork } from "./sandbox";
 
 /**
  * BOTH exports are required. The second is not optional, and its absence is what stopped this
@@ -416,7 +417,20 @@ function tenancyCommand(env: Env): string {
   );
 }
 
-const PRIME_COMMAND = '{ [ -d /workspace/agency ] || dsh-prime >&2; }; ';
+/**
+ * Establish the workspace, then put back whatever the last stop captured.
+ *
+ * `dsh-prime` clones or fetches what is missing — git is the source of truth. `restoreCapturedWork`
+ * is the safety net for what was NOT pushed: it applies the newest `dsh-work/<stamp>/` capture
+ * (tracked changes as a patch, untracked files as a tar) into the fresh clone. Both run to stderr so
+ * neither pollutes the reply.
+ *
+ * This is the half that was missing: the capture has run on every stop for a long time, and nothing
+ * ever read it back. A safety net that only fires in one direction is a machine for losing work
+ * slowly — the goal names it directly: a copy-out that never runs is the same as no persistence.
+ */
+const PRIME_COMMAND =
+  '{ [ -d /workspace/agency ] || dsh-prime >&2; }; ';
 
 function toBase64(text: string): string {
   const bytes = new TextEncoder().encode(text);
@@ -629,6 +643,32 @@ async function terminal(request: Request, env: Env): Promise<Response> {
     console.log(
       `dsh: could not back the session store with R2: ${describeError(error)}. The terminal still ` +
         `opens; the store is on the container's ephemeral disk for this session.`,
+    );
+  }
+
+  // PUT BACK WHAT THE LAST STOP CAPTURED, after the mount (it needs the container) and before the
+  // PTY opens (the TUI reads the workspace the moment it starts). Best-effort like the mount: an
+  // unreachable bucket or a patch that no longer applies is a report, never a reason to withhold the
+  // terminal. This is the half of persistence that was missing — the capture has always run on stop,
+  // and nothing ever read it back.
+  try {
+    const restored = await withTimeout(
+      restoreCapturedWork(sandbox, env.STATE),
+      STATE_MOUNT_TIMEOUT_MS,
+      "the captured-work restore",
+    );
+    if (restored.prefix !== null && restored.repos.length > 0) {
+      console.log(
+        `dsh: restored captured work from ${restored.prefix} into ${restored.repos.join(", ")}` +
+          (restored.failures.length > 0 ? ` (reported: ${restored.failures.join("; ")})` : ""),
+      );
+    } else if (restored.failures.length > 0) {
+      console.log(`dsh: captured-work restore reported: ${restored.failures.join("; ")}`);
+    }
+  } catch (error) {
+    console.log(
+      `dsh: captured-work restore failed: ${describeError(error)}. The workspace still opens with ` +
+        `whatever dsh-prime cloned; pushed work is unaffected.`,
     );
   }
 
