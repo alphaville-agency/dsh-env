@@ -44,3 +44,28 @@ search before you build, then say what you found.**
 Related: [`design-ladder.md`](design-ladder.md) decides *when not to write code* — this rule is how
 you find out what to write instead when you do. [`research-taste.md`](research-taste.md) is about
 what is worth investigating; this is about not inventing what exists.
+
+
+## What to search WITH, in this environment
+
+`web_search` is composed but **not usable here**: it is `@deepseek-ai/dsh-web-search-deepseek`, gated on
+`apiKeyEnv: DEEPSEEK_API_KEY`, and this container has no such key. An agent that reads the rule above
+and then reaches for `web_search` gets nothing, concludes there is nothing to find, and builds from
+scratch — which is the exact failure this rule exists to prevent, arriving through the back door.
+
+These paths work, and they are enough for prior art:
+
+| Need | Use |
+|---|---|
+| Projects that already do this | `gh search repos "<terms>" --limit 10 --json fullName,stargazersCount,description` |
+| How someone already wrote it | `gh search code "<terms>" --limit 10` |
+| A package's real API and versions | `npm view <pkg> description`, `npm view <pkg> readme` |
+| A specific page or doc | `web_fetch` (composed, needs no key) |
+| Semantic/field search | `agent-reach doctor` then its selected upstream |
+
+`gh` is authenticated in this container with a token that can read public repositories, so `gh search`
+is the primary discovery tool and needs no setup.
+
+**Cite what you find.** Naming the project, the package, or the standard you followed — and saying why
+you did not use it if you did not — is the deliverable. "I searched and found nothing" is only
+acceptable with the commands you ran printed next to it.
