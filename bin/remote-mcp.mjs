@@ -49,7 +49,7 @@ const BASE = process.env.DSH_URL ?? "https://dsh.alphaville.space";
  * Appended, not truncated per line: an interrupted turn leaves its transcript behind, which is exactly
  * when it is worth the most.
  */
-const LIVE_LOG = process.env.DSH_LIVE_LOG ?? "/tmp/alphaville-live.log";
+const LIVE_LOG = process.env.DSH_LIVE_LOG ?? process.env.ALPHAVILLE_HEAD ?? "/tmp/alphaville-loop-head.log";
 function live(text, stream = "out") {
   const stamp = new Date().toISOString().slice(11, 19);
   for (const line of String(text).split("\n")) {

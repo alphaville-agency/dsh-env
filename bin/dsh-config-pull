@@ -1,0 +1,94 @@
+#!/bin/sh
+# Pull the agent configuration into $DSH_HOME, so changing a rule is a push and not an image build.
+#
+# WHY THIS EXISTS. The rules, the profiles and the settings were baked into the image with COPY. That
+# made every wording change cost a full image build AND a `wrangler deploy`, and a deploy resets the
+# Durable Object that holds this container, which kills any session in flight. One turn's work was lost
+# that way. The fix is not a better build; it is not needing one.
+#
+# THE IMAGE COPY IS THE FLOOR, NOT THE SOURCE. Whatever ships in the image stays there. This runs at
+# start, and when it succeeds the repository's copy replaces it. So:
+#
+#   * a container that cannot reach GitHub still boots with working rules, and
+#   * a pull that fails is REPORTED and does not stop the session - stale rules beat no session.
+#
+# It never deletes. Files removed from the repository would linger in $DSH_HOME, which is the one way
+# this can drift; the alternative - wiping the directory - risks deleting the profiles the image owns
+# if the pull half-succeeds. Reported drift is better than a half-wiped boot.
+#
+#   dsh-config-pull          pull and install
+#   dsh-config-pull --quiet  same, for use inside another script
+set -eu
+
+QUIET=0
+[ "${1:-}" = "--quiet" ] && QUIET=1
+
+DSH_HOME_DIR="${DSH_HOME:-/root/.dsh}"
+REPO="${DSH_CONFIG_REPO:-https://github.com/alphaville-agency/tooling-config.git}"
+SRC="${DSH_CONFIG_SRC:-/tmp/tooling-config}"
+
+log() { [ "$QUIET" = "1" ] || echo "$@"; }
+warn() { echo "$@" >&2; }
+
+need() { command -v "$1" >/dev/null 2>&1 || { warn "dsh-config-pull: missing $1"; exit 0; }; }
+need git
+
+# THE TOKEN IS OPTIONAL AND ONLY FOR A PRIVATE REPO. `GH_TOKEN` is already injected by the Worker for
+# the workspace clone; reusing it here means no second credential to keep.
+if [ -n "${GH_TOKEN:-}" ]; then
+    REPO=$(printf '%s' "$REPO" | sed "s#https://#https://x-access-token:${GH_TOKEN}@#")
+fi
+
+if [ -d "$SRC/.git" ]; then
+    if ! git -C "$SRC" fetch --depth 1 origin main >/dev/null 2>&1; then
+        warn "dsh-config-pull: fetch failed; keeping the configuration already in $DSH_HOME_DIR"
+        exit 0
+    fi
+    git -C "$SRC" reset --hard FETCH_HEAD >/dev/null 2>&1 || {
+        warn "dsh-config-pull: reset failed; keeping the configuration already in $DSH_HOME_DIR"
+        exit 0
+    }
+else
+    rm -rf "$SRC"
+    if ! git clone --depth 1 --quiet "$REPO" "$SRC" >/dev/null 2>&1; then
+        warn "dsh-config-pull: clone failed; keeping the configuration already in $DSH_HOME_DIR"
+        exit 0
+    fi
+fi
+
+installed=0
+install_file() { # src dest
+    [ -f "$1" ] || return 0
+    mkdir -p "$(dirname "$2")"
+    cp "$1" "$2" && installed=$((installed + 1))
+}
+
+install_file "$SRC/dsh/AGENTS.md"      "$DSH_HOME_DIR/AGENTS.md"
+install_file "$SRC/dsh/MODEL-ROLES.md" "$DSH_HOME_DIR/MODEL-ROLES.md"
+
+if [ -d "$SRC/dsh/rules" ]; then
+    mkdir -p "$DSH_HOME_DIR/rules"
+    # One file at a time, so a rule that fails to copy does not take the directory with it.
+    for f in "$SRC"/dsh/rules/*.md; do
+        [ -f "$f" ] || continue
+        install_file "$f" "$DSH_HOME_DIR/rules/$(basename "$f")"
+    done
+fi
+
+if [ -d "$SRC/dsh/ontology" ]; then
+    for f in "$SRC"/dsh/ontology/*; do
+        [ -f "$f" ] || continue
+        install_file "$f" "$DSH_HOME_DIR/ontology/$(basename "$f")"
+    done
+fi
+
+install_file "$SRC/profile/settings.yaml" "$DSH_HOME_DIR/settings.yaml"
+
+# A patch layer only lands where its profile already exists - `dsh plugin add` creates the directory,
+# and a patch file for a profile that is not installed is a file nothing reads.
+install_file "$SRC/profile/cordis.patch.yml"          "$DSH_HOME_DIR/profiles/dsh-tui/cordis.patch.yml"
+install_file "$SRC/profile/acp-cordis.patch.yml"      "$DSH_HOME_DIR/profiles/acp/cordis.patch.yml"
+install_file "$SRC/profile/headless-cordis.patch.yml" "$DSH_HOME_DIR/profiles/headless/cordis.patch.yml"
+
+log "  configuration: $installed file(s) refreshed from tooling-config"
+exit 0

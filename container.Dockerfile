@@ -96,6 +96,13 @@ RUN chmod 0755 /usr/local/bin/dsh-session
 COPY bin/agent-ask.mjs /usr/local/bin/agent-ask
 RUN chmod 0755 /usr/local/bin/agent-ask
 
+# THE CONFIG PULLER. Pulls the agent configuration from alphaville-agency/tooling-config into
+# $DSH_HOME at start, so changing a rule is a push rather than an image build - and therefore does not
+# reset the Durable Object and kill the session. The COPYs below stay as the FLOOR: a container that
+# cannot reach GitHub still boots with working rules, and a failed pull is reported, not fatal.
+COPY bin/dsh-config-pull /usr/local/bin/dsh-config-pull
+RUN chmod 0755 /usr/local/bin/dsh-config-pull
+
 # pnpm, because that is what the harness uses to manage profiles.
 #
 # `dsh plugin add` shells out to pnpm and fails with 127 without it, and the reason is not
@@ -311,7 +318,7 @@ RUN command -v dsh \
 # This is also the only place a missing tool can be caught. The brief path was the counter-example:
 # python3 was absent, the interpreter failed, `|| true` swallowed it, and the boot banner showed the
 # result six hours later in front of the operator.
-RUN for t in git curl jq tmux rg less make python3 gpg gh node npm dsh agent-ask; do \
+RUN for t in git curl jq tmux rg less make python3 gpg gh node npm dsh agent-ask dsh-config-pull; do \
         command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 1; }; \
     done \
  && python3 --version \

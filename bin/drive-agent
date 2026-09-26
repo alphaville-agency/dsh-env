@@ -1,23 +1,51 @@
 #!/bin/sh
-# Drive the remote agent surface and leave the transcript on a stable path.
+# Drive the remote agent surface, leaving a head transcript that rotates rather than a symlink.
 #
-#   ./bin/drive-agent "<prompt>"        one turn
-#   ./bin/drive-agent --file PROMPT     one turn, prompt from a file
+#   ./bin/drive-agent "prompt text"
+#   ./bin/drive-agent --file PROMPT.txt
+#   ./bin/drive-agent --name prior-art --file PROMPT.txt
 #
-# The transcript is always /tmp/alphaville-run.log, and /tmp/alphaville-run-head.log points at the
-# newest one, so `tail -f /tmp/alphaville-run-head.log` works between runs without knowing a filename.
-# Per-run copies are kept as /tmp/alphaville-run.<epoch>.log.
+# THE HEAD. /tmp/alphaville-loop-head.log always holds the CURRENT turn. When a new turn starts, whatever
+# is in it is ROTATED OUT to
+#
+#   /tmp/alphaville-loop-<timestamp>-<name>.log
+#
+# rather than discarded or symlinked over. A symlink points at one file and says nothing about what ran
+# before it; rotation keeps every turn, in order, under a name that says which turn it was.
+#
+# Rotation happens on START, not on exit, and that is deliberate: a turn that is killed - a reset, a lost
+# socket - leaves its head in place for the next run to rotate, so an interrupted turn stays readable.
+# That is exactly the turn worth reading.
 set -eu
+
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-STAMP=$(date +%s)
-LOG="/tmp/alphaville-run.$STAMP.log"
-ln -sfn "$LOG" /tmp/alphaville-run-head.log
-if [ "${1:-}" = "--file" ]; then
-    PROMPT_FILE="$2"
-else
-    printf '%s' "$*" > "/tmp/alphaville-prompt.$STAMP.txt"
+HEAD="${ALPHAVILLE_HEAD:-/tmp/alphaville-loop-head.log}"
+
+NAME="turn"
+PROMPT_FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --name) NAME="$2"; shift 2 ;;
+        --file) PROMPT_FILE="$2"; shift 2 ;;
+        *) break ;;
+    esac
+done
+
+if [ -z "$PROMPT_FILE" ]; then
+    STAMP=$(date +%s)
     PROMPT_FILE="/tmp/alphaville-prompt.$STAMP.txt"
+    printf '%s' "$*" > "$PROMPT_FILE"
 fi
-echo "[transcript: $LOG]" >&2
-echo "[live:       tail -f /tmp/alphaville-run-head.log]" >&2
-node "$SELF_DIR/drive-agent.mjs" "$PROMPT_FILE" 2>&1 | tee "$LOG"
+
+if [ -s "$HEAD" ]; then
+    ROTATED="/tmp/alphaville-loop-$(date +%Y%m%dT%H%M%S)-${NAME}.log"
+    mv "$HEAD" "$ROTATED"
+    echo "[rotated previous head to $ROTATED]" >&2
+fi
+
+echo "[head:  $HEAD]" >&2
+echo "[live:  tail -f $HEAD]" >&2
+
+# THE ENVIRONMENT, NOT A FLAG, tells the writer where the head is: the Node driver and the MCP server
+# both read ALPHAVILLE_HEAD / DSH_LIVE_LOG, so there is one name for this file rather than three.
+ALPHAVILLE_HEAD="$HEAD" DSH_LIVE_LOG="$HEAD" node "$SELF_DIR/drive-agent.mjs" "$PROMPT_FILE"

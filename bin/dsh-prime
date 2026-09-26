@@ -22,6 +22,12 @@
 # credential from disk, and nothing prints one.
 set -eu
 
+# REFRESH THE AGENT CONFIGURATION FIRST, so the rules the session reads are the repository's current
+# ones rather than whatever the image was built with. Reported and non-fatal: stale rules beat no rules.
+if command -v dsh-config-pull >/dev/null 2>&1; then
+    dsh-config-pull --quiet || echo "  [the configuration could not be refreshed; using the image's copy]" >&2
+fi
+
 WORKSPACE="${DSH_WORKSPACE:-/workspace}"
 ORG="${DSH_ORG:-alphaville-agency}"
 STATUS_ONLY=0
