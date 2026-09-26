@@ -43,6 +43,20 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+      # THE DEPLOY CREDENTIAL, FOR THE CONTAINER RATHER THAN FOR THIS JOB.
+      #
+      # The job above already has `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in its environment,
+      # because wrangler-action needs them to deploy. Those are the SAME repository secrets, so copying
+      # them onto the Worker gives a session inside the container the ability to run `wrangler` itself -
+      # which is the difference between a development environment and a notebook. Nothing new is minted.
+      - name: cloudflare credential for the container
+        run: |
+          echo "${{ secrets.CLOUDFLARE_API_TOKEN }}"  | npx wrangler secret put CLOUDFLARE_API_TOKEN
+          echo "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" | npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       - name: model credential
         run: echo "${{ secrets.CF_AI_GATEWAY_TOKEN }}" | npx wrangler secret put CF_AI_GATEWAY_TOKEN
         env:

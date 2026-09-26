@@ -36,6 +36,8 @@
 import {
   DESCRIPTION_FIELD,
   GH_TOKEN_ENV,
+  CLOUDFLARE_API_TOKEN_ENV,
+  CLOUDFLARE_ACCOUNT_ID_ENV,
   METHOD_FIELD,
   METHOD_GET,
   METHOD_POST,
@@ -110,6 +112,8 @@ export interface Env {
   STATE: R2Bucket;
   [MODEL_KEY_ENV]?: string;
   [GH_TOKEN_ENV]?: string;
+  [CLOUDFLARE_API_TOKEN_ENV]?: string;
+  [CLOUDFLARE_ACCOUNT_ID_ENV]?: string;
 }
 
 /**
@@ -169,6 +173,16 @@ async function injectSecrets(sandbox: Sandbox, env: Env): Promise<void> {
   // is the ability to clone and push, which dsh-prime reports plainly when it runs.
   const ghToken = env[GH_TOKEN_ENV];
   if (typeof ghToken === "string" && ghToken.length > 0) values[GH_TOKEN_ENV] = ghToken;
+
+  // The deploy credential, so a session can run `wrangler` against the tenancy rather than only write
+  // files for someone else to deploy. Absent is a supported state: the environment still works as a
+  // shell and reports a clear wrangler auth error instead of a confusing one from here.
+  const cfToken = env[CLOUDFLARE_API_TOKEN_ENV];
+  if (typeof cfToken === "string" && cfToken.length > 0) values[CLOUDFLARE_API_TOKEN_ENV] = cfToken;
+  const cfAccount = env[CLOUDFLARE_ACCOUNT_ID_ENV];
+  if (typeof cfAccount === "string" && cfAccount.length > 0) {
+    values[CLOUDFLARE_ACCOUNT_ID_ENV] = cfAccount;
+  }
 
   if (Object.keys(values).length === 0) return;
   await sandbox.setEnvVars(values);
@@ -398,6 +412,11 @@ function agentEnv(env: Env): Record<string, string> {
   };
   const modelKey = env[MODEL_KEY_ENV];
   if (typeof modelKey === "string" && modelKey.length > 0) values[MODEL_KEY_ENV] = modelKey;
+  // The deploy credential travels on the command too: an `exec` does not inherit what `setEnvVars` set.
+  const cfToken = env[CLOUDFLARE_API_TOKEN_ENV];
+  if (typeof cfToken === "string" && cfToken.length > 0) values[CLOUDFLARE_API_TOKEN_ENV] = cfToken;
+  const cfAccount = env[CLOUDFLARE_ACCOUNT_ID_ENV];
+  if (typeof cfAccount === "string" && cfAccount.length > 0) values[CLOUDFLARE_ACCOUNT_ID_ENV] = cfAccount;
   return values;
 }
 

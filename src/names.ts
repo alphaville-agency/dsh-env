@@ -159,6 +159,30 @@ export const AGENT_SESSION = "agent";
  * ENV, and the harness reads its policy from the environment. Setting it here is what makes the
  * surface able to run a command at all.
  */
+/**
+ * The router this environment reaches its models through, and the two facts it reports.
+ *
+ * The Worker does not normally talk to the gateway - the container does. This exists for ONE caller:
+ * the schedule below, which has to know whether the model it is about to ask for is the one that is
+ * already paid for at this moment. The gateway answers that in a response header, so a one-token
+ * request is the cheapest possible way to ask, and it costs a fraction of a cent rather than the cost
+ * of waking a container to find out.
+ */
+export const GATEWAY_BASE_URL = "https://aig.drksci.com/dsh/v1";
+export const GATEWAY_PROVIDER_HEADER = "cf-aig-provider";
+
+/**
+ * The provider that means "this is already paid for".
+ *
+ * The router serves the reserved-hours subscription as `custom-cheapestinference` and the
+ * pay-per-token wallet as `custom-cheapinference` - names one letter apart, which is exactly the kind
+ * of pair this project has been burned by before. Measured, not read: a probe at 19:46 UTC answered
+ * `cf-aig-provider: custom-cheapinference` (wallet), and a goal-sized turn on the wallet answers
+ * `402 Insufficient wallet balance`. Outside the block the environment must stay asleep.
+ */
+export const SUBSCRIPTION_PROVIDER = "custom-cheapestinference";
+export const GATEWAY_PROBE_MODEL = "deepseek-v4.1-flash";
+
 export const DSH_PERMISSION_MODE_ENV = "DSH_PERMISSION_MODE";
 export const DSH_PERMISSION_MODE_VALUE = "danger-full-access";
 /**
@@ -192,6 +216,21 @@ export const MODEL_KEY_ENV = "CF_AI_GATEWAY_TOKEN";
  * resets on sleep and anything not pushed is gone.
  */
 export const GH_TOKEN_ENV = "GH_TOKEN";
+
+/**
+ * The Cloudflare credential the CONTAINER uses, as opposed to the one the Worker deploys with.
+ *
+ * They are not the same token and must not be confused: the Worker's own deploy credential arrives
+ * through GitHub Actions, while these two reach the container so that a session can run `wrangler`
+ * itself. Without them the environment can write a Worker and cannot deploy it, which is a notebook
+ * rather than a development environment.
+ *
+ * `CLOUDFLARE_ACCOUNT_ID` is injected alongside because wrangler will otherwise pick whichever account
+ * the token happens to be able to see first - and this project already has more than one, where the
+ * wrong choice lands the deploy in a tenancy with no Containers support at all.
+ */
+export const CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
+export const CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID";
 
 /** HTTP methods we dispatch on, and the one WebSocket protocol token we compare. */
 export const METHOD_GET = "GET";
