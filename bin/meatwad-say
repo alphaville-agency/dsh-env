@@ -1,0 +1,292 @@
+#!/bin/sh
+# meatwad-say — speak one short status line aloud in a childlike "Meatwad" voice.
+#
+# WHAT THIS IS
+#   A single command an agent can call at the end of a turn to say out loud what
+#   it just did and what it will do next. Text comes from argv or stdin, and it
+#   is spoken on the Mac's default output device.
+#
+# WHY macOS `say` AND NOT THE OLDER MEATWAD PIPELINES
+#   Two earlier voice setups exist on this laptop, and neither fits a per-turn
+#   status call:
+#     * ~/meatwad.py drives Chatterbox zero-shot voice cloning on this machine.
+#       It needs ~/.meatwad/ref/meatwad_ref.wav (absent) plus a Chatterbox venv,
+#       and on this CPU it needs minutes per line — so it cannot answer a turn.
+#       Its own docstring notes it replaced "macOS `say` + RVC" for quality.
+#     * ~/dsh-plugin-meatwad renders on a Modal GPU (~30 s cold start, network
+#       required) and, as installed, also drives an OpenPets desktop pet. The
+#       phrasebook endpoint answered 404 when probed on 2026-09-26.
+#   `say` synthesises locally in well under a second, needs no network, no GPU
+#   and no reference clip, and works when neither of the above is reachable.
+#   The Meatwad flavour therefore comes from voice choice plus cadence rather
+#   than from voice cloning: the "Bubbles" child voice, pitch raised and rate
+#   slowed with `say`'s own embedded speech commands.
+#
+# WHY IT RETURNS IMMEDIATELY
+#   Speech takes seconds; a turn must not wait for it. The foreground process
+#   only normalises the text, drops a file and starts a detached worker, then
+#   exits. It never waits on audio, so a slow or missing speaker can never stall
+#   an agent. The worker's pid is printed so a caller can inspect it, but the
+#   caller is not expected to.
+#
+# CAP
+#   MEATWAD_MAX_CHARS (default 220 — roughly two spoken sentences, ~12 s) caps
+#   what is read aloud. Longer input is cut at a word boundary and the cap is
+#   the whole point: an essay must not be read into a room. The full text is
+#   never modified on disk; only what gets spoken is capped.
+#
+# INTERRUPTION POLICY: LATEST WINS (interrupt, not queue)
+#   Two quick calls must not play over each other; macOS `say` would mix them
+#   into garble. A pid file records the running `say`, and a new call kills it
+#   before starting. Interrupt was chosen over a FIFO queue because these are
+#   status updates: only the newest one is still true, and a stale line spoken
+#   20 s late is worse than a cut-off one. The cost is that a sentence already
+#   in progress is aborted mid-word.
+#
+# FAILURE POLICY
+#   Audio problems never fail a turn: the exit status is 0 even when nothing can
+#   be spoken. Anything knowable up front (no `say`, unknown voice, empty text)
+#   is reported on stderr before the script exits. Failures that can only happen
+#   later (no output device, device busy) are reported on stderr by the detached
+#   worker and appended to $MEATWAD_RUNDIR/meatwad-say.log, because the caller
+#   has already returned by then.
+#
+# NO PETS
+#   Nothing here mentions, plays or animates a desktop pet, and no pet sound or
+#   pet phrase is included. The older plugin coupled its voice to an OpenPets
+#   companion; that coupling is deliberately dropped.
+#
+# USAGE
+#   meatwad-say "Wired the script; verifying audio next"
+#   echo "All tests pass" | meatwad-say
+#   meatwad-say --plain "no Meatwad framing, just the child voice"
+#   meatwad-say --check          # report voice, output device and log path
+#   meatwad-say --dry-run "..."  # print what would be spoken; no audio
+#
+# ENV
+#   MEATWAD_VOICE      voice name (default: Bubbles, a child voice)
+#   MEATWAD_MAX_CHARS  spoken-length cap (default: 220)
+#   MEATWAD_RUNDIR     runtime dir (default: $TMPDIR/meatwad-say)
+
+set -u
+
+SAY=/usr/bin/say
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SELF="$SELF_DIR/$(basename -- "$0")"
+# $TMPDIR already ends in a slash, so trim it before appending rather than
+# leaving a cosmetic double slash in every path this script reports.
+TMP_BASE=${TMPDIR:-/tmp}
+TMP_BASE=${TMP_BASE%/}
+RUNDIR=${MEATWAD_RUNDIR:-$TMP_BASE/meatwad-say}
+RUNDIR=${RUNDIR%/}
+PIDFILE="$RUNDIR/say.pid"
+LOG="$RUNDIR/meatwad-say.log"
+MAX_CHARS=${MEATWAD_MAX_CHARS:-220}
+DEFAULT_VOICE=${MEATWAD_VOICE:-Bubbles}
+FALLBACK_VOICES="Bubbles Junior"
+
+die_soft() {  # report a reason, never fail the turn
+    printf 'meatwad-say: %s\n' "$1" >&2
+    exit 0
+}
+
+# ---------------------------------------------------------------- worker mode
+# Re-executed detached by the foreground path; not a public interface.
+if [ "${1:-}" = "--worker" ]; then
+    shift
+    textfile=${1:-}; voice=${2:-}
+    mkdir -p "$RUNDIR" 2>/dev/null
+    lock="$RUNDIR/lock"
+
+    # Serialise access to the pid file. mkdir is the atomic primitive that
+    # exists everywhere on macOS (there is no flock(1)); a lock older than a
+    # few seconds is treated as abandoned so a killed worker cannot wedge us.
+    tries=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 120 ]; then
+            printf 'meatwad-say: could not acquire %s; speaking anyway\n' "$lock" >&2
+            break
+        fi
+        if [ "$tries" -eq 60 ]; then
+            # ~3 s held and still not released: assume a worker died mid-speech.
+            printf 'meatwad-say: breaking stale lock %s\n' "$lock" >&2
+            rm -rf "$lock" 2>/dev/null
+        fi
+        sleep 0.05
+    done
+
+    # Latest wins: stop whatever `say` is already speaking.
+    if [ -f "$PIDFILE" ]; then
+        old=$(cat "$PIDFILE" 2>/dev/null)
+        case "$old" in
+            ''|*[!0-9]*) ;;
+            *)
+                if kill -0 "$old" 2>/dev/null; then
+                    kill -TERM "$old" 2>/dev/null
+                    n=0
+                    while kill -0 "$old" 2>/dev/null && [ "$n" -lt 20 ]; do
+                        sleep 0.05; n=$((n + 1))
+                    done
+                    kill -KILL "$old" 2>/dev/null
+                    printf 'meatwad-say: interrupted previous speech (pid %s)\n' \
+                        "$old" >&2
+                fi
+                ;;
+        esac
+    fi
+
+    # Start our own speech and publish its pid while still holding the lock,
+    # so the next call interrupts this one and not merely this worker.
+    if [ -n "$voice" ]; then
+        "$SAY" -v "$voice" -f "$textfile" &
+    else
+        "$SAY" -f "$textfile" &
+    fi
+    saypid=$!
+    printf '%s\n' "$saypid" >"$PIDFILE" 2>/dev/null
+    rmdir "$lock" 2>/dev/null
+
+    # stderr is suppressed here only to swallow the shell's own "Terminated"
+    # job notice when a newer call kills us; our own messages go to fd 2 after.
+    wait "$saypid" 2>/dev/null
+    rc=$?
+    [ -n "$textfile" ] && rm -f "$textfile" 2>/dev/null
+    if [ "$rc" -ne 0 ]; then
+        # 143/137 mean a newer call interrupted us, which is expected, not an error.
+        if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            printf 'meatwad-say: speech superseded by a newer call\n' >&2
+        else
+            printf 'meatwad-say: say failed (exit %s) — no sound was produced; is an output device available?\n' \
+                "$rc" >&2
+        fi
+    fi
+    exit 0
+fi
+
+# ----------------------------------------------------------- foreground mode
+plain=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --plain) plain=1; shift ;;
+        --check)  check=1; shift ;;
+        --dry-run) dry=1; shift ;;
+        -h|--help) sed -n '2,60p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+
+voice=$DEFAULT_VOICE
+
+# --- voice availability: `say -v ?` is instant and triggers no audio ---------
+voice_ok() { "$SAY" -v '?' 2>/dev/null | awk -v v="$1" '$1 == v { found = 1 } END { exit !found }'; }
+if [ ! -x "$SAY" ]; then
+    die_soft "no executable $SAY; cannot speak"
+fi
+if ! voice_ok "$voice"; then
+    fallback=''
+    for candidate in $FALLBACK_VOICES; do
+        if voice_ok "$candidate"; then fallback=$candidate; break; fi
+    done
+    printf 'meatwad-say: voice %s is not installed; using %s\n' \
+        "$voice" "${fallback:-the system default voice}" >&2
+    voice=$fallback
+fi
+
+if [ "${check:-0}" = 1 ]; then
+    printf 'say:     %s\n' "$SAY"
+    printf 'voice:   %s\n' "${voice:-system default}"
+    printf 'cap:     %s chars\n' "$MAX_CHARS"
+    printf 'rundir:  %s\n' "$RUNDIR"
+    printf 'log:     %s\n' "$LOG"
+    printf 'volume:  %s\n' "$(osascript -e 'get volume settings' 2>/dev/null || echo unknown)"
+    exit 0
+fi
+
+# --- collect the message: argv first, otherwise stdin ------------------------
+if [ $# -gt 0 ]; then
+    raw=$*
+elif [ ! -t 0 ]; then
+    raw=$(cat)
+else
+    raw=''
+fi
+[ -n "$raw" ] || die_soft 'nothing to say (pass text as arguments or on stdin)'
+
+mkdir -p "$RUNDIR" 2>/dev/null || die_soft "cannot create $RUNDIR"
+
+# --- shape the line: Meatwad framing, cadence, cap ---------------------------
+# python3 carries the shaping because it handles unicode and word boundaries
+# cleanly; if it is unavailable the unshaped text is spoken rather than nothing.
+if command -v python3 >/dev/null 2>&1; then
+    shaped=$(MEATWAD_RAW="$raw" MEATWAD_PLAIN="$plain" MEATWAD_CAP="$MAX_CHARS" \
+        python3 - <<'PY' 2>/dev/null
+import os, re, sys, unicodedata
+
+text = os.environ.get('MEATWAD_RAW', '')
+cap = int(os.environ.get('MEATWAD_CAP') or 220)
+plain = os.environ.get('MEATWAD_PLAIN') == '1'
+
+# Things that read badly aloud: links, code fences, symbols, emoji.
+text = re.sub(r'```.*?```', ' ', text, flags=re.S)
+text = re.sub(r'`([^`]*)`', r'\1', text)
+text = re.sub(r'https?://\S+', ' a link ', text)
+text = re.sub(r'\b[\w./-]+\.(py|sh|js|ts|md|json|yml|yaml|txt|wav|log)\b', ' a file ', text)
+text = re.sub(r'[*_#>|~]+', ' ', text)
+# Our own embedded speech commands are injected later, so the message may not
+# bring its own: strip the brackets rather than let input steer the voice.
+text = text.replace('[[', ' ').replace(']]', ' ')
+keep = []
+for ch in text:
+    if ch.isascii() or unicodedata.category(ch).startswith('L'):
+        keep.append(ch)
+    elif ch.isspace():
+        keep.append(' ')
+    # everything else (emoji, box drawing, arrows, bullets) is dropped
+text = ''.join(keep)
+# Markdown bullets and list noise become sentence breaks.
+text = re.sub(r'^\s*[-*\u2022]+\s*', '', text, flags=re.M)
+text = re.sub(r'\s+', ' ', text).strip(' ,;:-')
+text = re.sub(r'\s*([,;:])\s*', r'\1 ', text)
+text = re.sub(r'\s+', ' ', text).strip()
+
+if not plain:
+    # Third-person framing is the flavour: a child describing its own work.
+    if not re.match(r'(?i)^meatwad\b', text):
+        text = 'Meatwad says: ' + text
+    # Full stops give the child voice somewhere to breathe.
+    if text and text[-1] not in '.!?':
+        text += '.'
+
+if len(text) > cap:
+    cut = text[:cap]
+    if ' ' in cut:
+        cut = cut[:cut.rstrip().rfind(' ')]
+    text = cut.rstrip(' ,;:') + ' ...'
+
+if not plain:
+    # Cadence, not just voice: a little higher and slower reads childlike.
+    text = '[[pbas +22]] [[rate 172]] ' + text
+print(text)
+PY
+)
+    [ -n "$shaped" ] || shaped=$raw
+else
+    shaped=$raw
+fi
+
+printf '%s\n' "$shaped" >"$RUNDIR/line.$$.txt" || die_soft "cannot write $RUNDIR/line.$$.txt"
+
+if [ "${dry:-0}" = 1 ]; then
+    printf '%s\n' "$shaped"
+    rm -f "$RUNDIR/line.$$.txt"
+    exit 0
+fi
+
+# --- detach: speak in the background so the caller is never blocked ----------
+"$SELF" --worker "$RUNDIR/line.$$.txt" "$voice" </dev/null >>"$LOG" 2>&1 &
+worker=$!
+printf '%s\n' "$worker"
+
+exit 0
