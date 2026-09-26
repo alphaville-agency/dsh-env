@@ -104,3 +104,40 @@ can silently spend against". The environment's own build order says the same thi
 `workers_routes`, `workers_kv`, R2, Durable Objects and Secrets Store as the work requires, delivered
 so it can be rotated without redeploying the image — and, as the broker lands, replaced by per-task
 short-lived credentials rather than one long-lived one.
+
+
+## The loop is spec-first, and Plane is where the specs live
+
+The self-sustaining loop is not "wake up and do something". It is the same development process a
+competent team runs, with the humans replaced by gates:
+
+1. **Specify, in Plane, before any code.** Product requirements, architecture requirements and the
+   detailed design — plus wireframes where there is a surface — as Plane *documents* attached to the
+   work, not as prose in a chat that the next session cannot find. The rule that findings must be
+   durable applies first and hardest to the spec: a design that lives in a turn is a design that dies
+   with it, which this project has now watched happen.
+2. **Plan the cycle.** Work becomes Plane work items grouped into *modules* (feature areas) and
+   scheduled in a *cycle*. Each item carries its own acceptance criteria, because an item without them
+   cannot be finished — only abandoned.
+3. **Assign, then execute in loops.** The loop dequeues the next assigned item and works it to its
+   acceptance criteria: implement, run it, commit, push, record evidence on the item. One item per
+   turn, so a reset costs one item rather than a design.
+4. **Review before it counts as done.** Architecture and design decisions go to the senior model for a
+   pass — the reviewer role, not the implementer's own judgement. Review is a gate on the item's state,
+   not a comment.
+
+**Triggers feed intake, and intake is deliberate.** The loop is woken by a schedule, by mail to
+`dev@alphaville.space`, or by a watched queue changing — and a wake does not mean "start editing". It
+means: read intake, decide whether it is a change to the plan, and either create or update a Plane item
+or reject it. Execution happens against an item that exists. That is the difference between a
+development loop and a knee-jerk, and it is the whole reason the plan lives in Plane rather than in the
+loop's own prompt.
+
+**The vocabulary is `plane`'s and the harness already ships the skill.** Plane gives `documents`,
+`modules`, `cycles`, `intake` and work items; the skill is installed in the shared catalog and is
+discovered natively, so no path needs to be remembered. Requirements naming (`PRD` / `ARD` / `DLD`) is
+this project's convention for which document is which — Plane holds them.
+
+**This needs Plane credentials like it needs the Cloudflare token**, and they are the same shape of
+request: live, scoped, rotated without an image rebuild. Without them the loop has nowhere to read the
+plan from, and a loop that cannot read the plan is the knee-jerk the requirement exists to prevent.
