@@ -84,6 +84,21 @@ fi
 
 install_file "$SRC/profile/settings.yaml" "$DSH_HOME_DIR/settings.yaml"
 
+# SKILLS, IF THE REPOSITORY CARRIES THEM. GitHub Projects and SpecKit are vendored there so the
+# harness discovers them in its catalog without a network fetch; a skill that is not copied is a skill
+# nothing consumes, which is the exact defect the dangling-references rule names. The destination is
+# $DSH_HOME/skills only when the harness reads it from there - if the catalog is elsewhere the copy is
+# harmless and the README's layout table is the place to change it.
+if [ -d "$SRC/skills" ]; then
+    for d in "$SRC"/skills/*/; do
+        [ -d "$d" ] || continue
+        name=$(basename "$d")
+        rm -rf "$DSH_HOME_DIR/skills/$name"
+        mkdir -p "$DSH_HOME_DIR/skills"
+        cp -R "$d" "$DSH_HOME_DIR/skills/$name" && installed=$((installed + 1))
+    done
+fi
+
 # A patch layer only lands where its profile already exists - `dsh plugin add` creates the directory,
 # and a patch file for a profile that is not installed is a file nothing reads.
 install_file "$SRC/profile/cordis.patch.yml"          "$DSH_HOME_DIR/profiles/dsh-tui/cordis.patch.yml"

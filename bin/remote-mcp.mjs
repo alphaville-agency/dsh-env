@@ -166,6 +166,34 @@ function askRemote(prompt, onProgress) {
   });
 }
 
+/**
+ * Put the tenancy credential into this process's environment before anything is spawned.
+ *
+ * WHY THIS EXISTS HERE AND NOT IN THE CONTAINER. The harness's subprocess seam drops ambient names
+ * matching `/KEY|PASSWORD|SECRET|TOKEN/i` from the environment it hands to CHILD processes - measured:
+ * `CLOUDFLARE_ACCOUNT_ID` arrived while `CLOUDFLARE_API_TOKEN` did not, so `wrangler` inside a session
+ * answered "not authenticated" while the account was right there. The Worker delivers the credential as
+ * a FILE instead, which is not an environment variable and therefore not scrubbed; a session's bash
+ * tool sources it and works. This server SPAWNS `dsh` as a child, so it inherits the scrub and would get
+ * nothing - sourcing the file into our own environment first is what lets the child inherit a value.
+ *
+ * Absent is fine: without it the remote session still works as a shell and reports wrangler's own auth
+ * error rather than a confusing one from here.
+ */
+function loadTenancyEnv() {
+  const path = process.env.TENANCY_ENV ?? "/root/.dsh/tenancy.env";
+  try {
+    const text = readFileSync(path, "utf8");
+    for (const line of text.split("\n")) {
+      const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
+      if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].trim();
+    }
+  } catch {
+    // No file, no credential - reported later by the tool that needs it.
+  }
+}
+loadTenancyEnv();
+
 const server = new McpServer({ name: "remote-dsh", version: "1.0.0" });
 
 server.registerTool(

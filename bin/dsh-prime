@@ -93,6 +93,28 @@ done
 # Wait for every child, and do not let one failure abort the others.
 wait || true
 
+# THE COMMIT IDENTITY BELONGS TO THE REPOSITORY, NOT TO THE CONTAINER.
+#
+# The image sets one global identity (`alphaville@alphaville.space`) because a git with no identity
+# refuses to commit at all. But this workspace clones two different projects, and the container's own
+# rules distinguish them: tooling is the dev environment and is committed as `dev@alphaville.space`,
+# while the agency is committed as `alphaville@alphaville.space`. One global default would attribute
+# every commit from both to one address - and attributing a project's work to the wrong identity is
+# the same class of mistake the entity's own rules call out: signing up AS the entity is authorised,
+# acting as somebody else is not.
+#
+# Local config wins over global, so this only changes what each repo already had. A repo that is not
+# listed keeps the container's global default, which is the correct fallback rather than a guess.
+for repo in $REPOS; do
+    [ -d "$WORKSPACE/$repo/.git" ] || continue
+    case "$repo" in
+        tooling)  email=dev@alphaville.space ;;
+        agency)   email=alphaville@alphaville.space ;;
+        *)        continue ;;
+    esac
+    git -C "$WORKSPACE/$repo" config user.name  "Alphaville"       && git -C "$WORKSPACE/$repo" config user.email "$email"
+done
+
 for repo in $REPOS; do
     [ -f "$results_dir/$repo" ] && cat "$results_dir/$repo"
 done
