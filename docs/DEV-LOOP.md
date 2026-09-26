@@ -97,3 +97,43 @@ state in labels, history in commits that reference issues, and evidence in `EVID
 **Rules this process is bound by**, and must be checked against in the orchestrator gate: one writer per
 tree; a build claim is measured, not asserted; a reference that does not resolve is the defect; prove the
 floor before stacking on it; attribute a measurement before optimising against it.
+
+
+## 7. Build on the harness's own lifecycle, not beside it
+
+The first draft of this document proposed a bespoke loop: a Worker cron, a queue in R2, and a prompt
+kept in the loop's own text. That duplicates machinery the harness already runs and is exactly the kind
+of hand-rolled plumbing the prior-art rule exists to stop.
+
+[`docs/agent-lifecycle.md`](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/agent-lifecycle.md)
+defines what is natively supported, and the loop should be composed from these:
+
+| Need | Native primitive |
+|---|---|
+| Queue work into a session | `followup(content)`, and the `agent/inbox/*` events (`spliced`, `inserted`, `claimed`) that publish it |
+| Loop the same goal across rounds | `dsh-goal` + `dsh-goal-round-driver` ("race-fenced same-session goal-round driver") |
+| Iterate a fresh agent per attempt | `dsh-tool-ralph` |
+| Fan work out across many agents | the workflow tool, and `dsh-tool-subagent` (continuable) |
+| Run on a schedule | `dsh-schedule` |
+| Inject or reject the next step | the `agent/pre-step` waterfall — its decision is authoritative |
+| Rewrite the request before it is derived | the `agent/request` waterfall |
+| Recover from a failed request | the `agent/request-error` waterfall (retry returns an action; otherwise the original error stands) |
+| Terminal checkpoint before a turn stops | `agent/turn-stopping` (serial) |
+| Steer or inject context mid-flight | steering and injected context, through the same waterfall after a later claim |
+| Durable replay facts | `session/event` — read this, not `agent/*`, for a transcript |
+| Live control and status | `agent/*` (queue, status, interception, steering, continuation, errors) |
+| Bridge to the remote environment | `dsh-mcp-client` + `bin/remote-mcp.mjs` (already built and verified) |
+| React to CI or PR events | `dsh-hooks-claude-code` / `dsh-hooks-codex` hook protocols |
+
+**Two consequences for the design above.**
+
+- **The plan is injected, not remembered.** "Read intake, decide, then execute" is a composition:
+  a schedule or a webhook wakes the session, an `agent/pre-step` listener supplies the plan and the
+  rules as context, and the driver's own queue supplies the item. The loop does not need its own
+  prompt to carry the process, because the waterfall can supply it every step.
+- **The review gates are hook points, not a bespoke state machine.** Intake being deliberate is
+  enforceable natively: a `pre-step` listener that rejects a step whose item has no merged spec is the
+  rule expressed in the mechanism that already governs steps.
+
+The bespoke version is not forbidden — but it must be a deliberate rejection of a native primitive with
+the constraint named, not an oversight. Nothing in the first draft met that bar.
