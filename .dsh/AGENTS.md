@@ -16,12 +16,13 @@ longer the default.
 agency's, `operator-inbox` is the operator's. Nobody routes work by telling someone in a message: the
 label is the routing, and reading your own inbox is the responsibility that comes with it.
 
-**Specification is an artifact and it comes first.** Every item carries `docs/specs/<issue>/` with
-`PRD.md` (what problem, for whom, what done looks like), `ARD.md` (architecture, boundaries, and what we
-are deliberately not doing), `DLD.md` (schemas, interfaces, failure modes) and `EVIDENCE.md` (commands
-and their real output — "it works" is not evidence). The spec is merged as its own pull request before
-implementation starts. A design that lives only in a turn dies with the turn, which this environment has
-watched happen.
+**Specification is an artifact, it comes first, and it follows SpecKit.** Every item carries
+`specs/<issue>-<slug>/` with SpecKit's own files — `constitution.md`, `spec.md`, `plan.md`, `tasks.md`,
+`checklist.md` — plus `EVIDENCE.md` (commands and their real output; "it works" is not evidence). This
+is prior art rather than an invention: `github/spec-kit` is the established toolkit and the frozen
+`alphaville-foundry` already uses this exact shape. The spec is merged as its own pull request before
+implementation starts, and a heavier model writes the formal documents from an initial draft. A design
+that lives only in a turn dies with the turn, which this environment has watched happen.
 
 **The full process is `docs/DEV-LOOP.md`** — branching, the three review gates that each leave comments,
 and the merge rule. Read it before starting work; it is the pattern, not a suggestion.

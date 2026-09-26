@@ -12,23 +12,33 @@ this process exists to prevent, so the tool that works today is the tool that ru
 below is deliberately written against concepts Plane also has — documents, items, cycles, states — so a
 move to Plane is a translation of the vocabulary, not a redesign.
 
-## 1. Specification comes first, and it is an artifact
+## 1. Specification comes first, and it follows SpecKit
 
-Nothing is implemented before its design exists in the repository. Each work item carries, as files in
-`docs/specs/<issue-number>-<slug>/`:
+**This is prior art, not an invention.** [`github/spec-kit`](https://github.com/github/spec-kit) is the
+established spec-driven-development toolkit, shipping `constitution-template.md`, `spec-template.md`,
+`plan-template.md`, `tasks-template.md`, `checklist-template.md` and the `commands/` that drive them
+(`/specify`, `/plan`, `/tasks`). The frozen `alphaville-foundry` repository already uses exactly this
+shape — `specs/004-appflowy-state-plane/{spec,plan,tasks}.md` — so the convention is already in the
+family and adopting it is a continuation rather than a new vocabulary.
 
-| Document | Question it answers |
-|---|---|
-| `PRD.md` | What problem, for whom, and what does done look like |
-| `ARD.md` | The architecture: components, boundaries, data flow, and what we are deliberately not doing |
-| `DLD.md` | The detailed design: schemas, interfaces, state machines, failure modes |
-| `wireframes/` | Where there is a surface, what it looks like |
-| `EVIDENCE.md` | What was actually run, and what it returned |
+The first draft of this document invented `PRD.md` / `ARD.md` / `DLD.md` instead. That was the
+prior-art rule being broken by the document that enforces it, and it is corrected here.
 
-The spec is a **pull request of its own**, merged before implementation begins. A design that lives only
-in a turn dies with the turn, and this project has watched that happen.
+**Structure**, one directory per work item, `specs/<issue>-<slug>/`:
 
-`EVIDENCE.md` is not optional and not prose: commands and their real output. "It works" is not evidence.
+| File | From | What it holds |
+|---|---|---|
+| `constitution.md` | SpecKit | The standing rules this work is bound by, inherited rather than re-derived |
+| `spec.md` | SpecKit | The requirement: what problem, for whom, what done looks like, and the acceptance criteria |
+| `plan.md` | SpecKit | The technical approach: components, boundaries, data flow, and what is deliberately not being done |
+| `tasks.md` | SpecKit | The ordered, individually checkable tasks that implement the plan |
+| `checklist.md` | SpecKit | Pre-merge checks, so review is a checklist and not a mood |
+| `EVIDENCE.md` | this environment | Commands and their real output. Not prose, and not optional: "it works" is not evidence |
+
+**How it runs in the loop.** The session drafts each sprint/feature from an initial sketch, then the
+heavier model writes the formal `spec.md` / `plan.md` / `tasks.md` against it, taking into account the
+standing rules (`constitution.md`, `.dsh/rules/`), the clean-slate docs, and prior work on
+`alphaville-foundry`. The spec is a pull request of its own, merged before implementation begins.
 
 ## 2. Branching
 
