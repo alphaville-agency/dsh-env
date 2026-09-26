@@ -37,6 +37,7 @@ import {
   DESCRIPTION_FIELD,
   GH_TOKEN_ENV,
   CLOUDFLARE_API_TOKEN_ENV,
+  TENANCY_TOKEN_SECRET,
   CLOUDFLARE_ACCOUNT_ID_ENV,
   METHOD_FIELD,
   METHOD_GET,
@@ -112,7 +113,7 @@ export interface Env {
   STATE: R2Bucket;
   [MODEL_KEY_ENV]?: string;
   [GH_TOKEN_ENV]?: string;
-  [CLOUDFLARE_API_TOKEN_ENV]?: string;
+  [TENANCY_TOKEN_SECRET]?: string;
   [CLOUDFLARE_ACCOUNT_ID_ENV]?: string;
 }
 
@@ -177,7 +178,7 @@ async function injectSecrets(sandbox: Sandbox, env: Env): Promise<void> {
   // The deploy credential, so a session can run `wrangler` against the tenancy rather than only write
   // files for someone else to deploy. Absent is a supported state: the environment still works as a
   // shell and reports a clear wrangler auth error instead of a confusing one from here.
-  const cfToken = env[CLOUDFLARE_API_TOKEN_ENV];
+  const cfToken = env[TENANCY_TOKEN_SECRET];
   if (typeof cfToken === "string" && cfToken.length > 0) values[CLOUDFLARE_API_TOKEN_ENV] = cfToken;
   const cfAccount = env[CLOUDFLARE_ACCOUNT_ID_ENV];
   if (typeof cfAccount === "string" && cfAccount.length > 0) {
@@ -413,7 +414,7 @@ function agentEnv(env: Env): Record<string, string> {
   const modelKey = env[MODEL_KEY_ENV];
   if (typeof modelKey === "string" && modelKey.length > 0) values[MODEL_KEY_ENV] = modelKey;
   // The deploy credential travels on the command too: an `exec` does not inherit what `setEnvVars` set.
-  const cfToken = env[CLOUDFLARE_API_TOKEN_ENV];
+  const cfToken = env[TENANCY_TOKEN_SECRET];
   if (typeof cfToken === "string" && cfToken.length > 0) values[CLOUDFLARE_API_TOKEN_ENV] = cfToken;
   const cfAccount = env[CLOUDFLARE_ACCOUNT_ID_ENV];
   if (typeof cfAccount === "string" && cfAccount.length > 0) values[CLOUDFLARE_ACCOUNT_ID_ENV] = cfAccount;

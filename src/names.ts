@@ -229,6 +229,19 @@ export const GH_TOKEN_ENV = "GH_TOKEN";
  * the token happens to be able to see first - and this project already has more than one, where the
  * wrong choice lands the deploy in a tenancy with no Containers support at all.
  */
+/**
+ * The Worker secret that CARRIES the tenancy token - deliberately not named `CLOUDFLARE_API_TOKEN`.
+ *
+ * MEASURED, NOT ASSUMED. The secret was uploaded successfully under `CLOUDFLARE_API_TOKEN` and the
+ * container received `CLOUDFLARE_ACCOUNT_ID` while `CLOUDFLARE_API_TOKEN` came through EMPTY, so
+ * `wrangler whoami` inside the session answered "You are not authenticated". The name is consumed by
+ * the platform rather than handed to the Worker, so what the runtime sees is not what wrangler stored.
+ * Holding it under our own name and mapping it to `CLOUDFLARE_API_TOKEN` for the container gets the
+ * credential to the place that needs it without fighting the platform for a reserved word.
+ */
+export const TENANCY_TOKEN_SECRET = "TENANCY_CLOUDFLARE_TOKEN";
+
+/** The name the CONTAINER must see, which is what `wrangler` reads. */
 export const CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
 export const CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID";
 

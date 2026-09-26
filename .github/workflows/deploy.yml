@@ -49,9 +49,15 @@ jobs:
       # because wrangler-action needs them to deploy. Those are the SAME repository secrets, so copying
       # them onto the Worker gives a session inside the container the ability to run `wrangler` itself -
       # which is the difference between a development environment and a notebook. Nothing new is minted.
+      #
+      # THE TOKEN GOES UNDER A NAME OF OURS. Uploaded as `CLOUDFLARE_API_TOKEN` it stored successfully
+      # and then arrived at the Worker EMPTY - the platform consumes that name rather than handing it
+      # over - so the container got the account id and no token, and `wrangler whoami` said "not
+      # authenticated". It is held as TENANCY_CLOUDFLARE_TOKEN and mapped to CLOUDFLARE_API_TOKEN for
+      # the container, which is the name wrangler actually reads.
       - name: cloudflare credential for the container
         run: |
-          echo "${{ secrets.CLOUDFLARE_API_TOKEN }}"  | npx wrangler secret put CLOUDFLARE_API_TOKEN
+          echo "${{ secrets.CLOUDFLARE_API_TOKEN }}"  | npx wrangler secret put TENANCY_CLOUDFLARE_TOKEN
           echo "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" | npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
