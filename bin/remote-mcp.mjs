@@ -20,7 +20,7 @@
 //
 //   node remote-mcp.mjs          serve MCP over stdio
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 
 // THE SDK IS RESOLVED FROM THE PROFILE, NOT FROM THIS DIRECTORY.
@@ -36,6 +36,31 @@ const { StdioServerTransport } = requireFromProfile("@modelcontextprotocol/sdk/s
 const { z } = requireFromProfile("zod");
 
 const BASE = process.env.DSH_URL ?? "https://dsh.alphaville.space";
+
+/**
+ * Where the turn is written while it runs.
+ *
+ * A TOOL CALL THAT REPORTS ONLY AT THE END IS INDISTINGUISHABLE FROM A HANG, and a remote turn here
+ * edits a repository, runs commands and pushes - minutes of work. Progress is therefore mirrored to a
+ * file as it arrives, so `tail -f` shows rapidly updating lines the whole time, and the tool's result
+ * is the summary once it is done. The MCP progress notification is sent as well, for clients that
+ * surface it; the file is what works regardless of what the client does with notifications.
+ *
+ * Appended, not truncated per line: an interrupted turn leaves its transcript behind, which is exactly
+ * when it is worth the most.
+ */
+const LIVE_LOG = process.env.DSH_LIVE_LOG ?? "/tmp/alphaville-live.log";
+function live(text, stream = "out") {
+  const stamp = new Date().toISOString().slice(11, 19);
+  for (const line of String(text).split("\n")) {
+    if (line.trim().length === 0) continue;
+    try {
+      appendFileSync(LIVE_LOG, `[${stamp}] ${stream === "err" ? "· " : ""}${line}\n`);
+    } catch {
+      // An unwritable log must not fail the turn it is describing.
+    }
+  }
+}
 const ACCESS_FILE = process.env.DSH_ACCESS_FILE ?? `${homedir()}/.dsh/access`;
 
 /**
@@ -154,11 +179,37 @@ server.registerTool(
       "runs tests and pushes can take several minutes.",
     inputSchema: { prompt: z.string().min(1).describe("The instruction for the remote session.") },
   },
-  async ({ prompt }) => {
+  async ({ prompt }, extra) => {
+    // One line to say the turn started, so the log is never empty while the container wakes.
     try {
-      const text = await askRemote(prompt);
+      writeFileSync(LIVE_LOG, "");
+    } catch {
+      /* unwritable is not fatal */
+    }
+    live(`remote turn started (${prompt.length} chars)`);
+    // MCP progress, best-effort: a client without a progress token simply does not get it.
+    const token = extra?._meta?.progressToken;
+    let ticks = 0;
+    const progress = async () => {
+      if (token === undefined) return;
+      try {
+        await extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken: token, progress: ++ticks, message: "remote turn running" },
+        });
+      } catch {
+        /* the client stopped listening */
+      }
+    };
+    try {
+      const text = await askRemote(prompt, (chunk, isErr) => {
+        live(chunk, isErr ? "err" : "out");
+        void progress();
+      });
+      live(`turn finished (${text.length} chars)`);
       return { content: [{ type: "text", text }] };
     } catch (error) {
+      live(`turn failed: ${error.message}`, "err");
       return { content: [{ type: "text", text: `remote dsh: ${error.message}` }], isError: true };
     }
   },

@@ -71,3 +71,36 @@ Each of these exists only because the disk is transient and the image is the onl
 3. Move the agent config out of the image and into a start-time pull from git.
 4. Only then delete the mechanisms above — one at a time, each after the replacement is proven, because
    the failure mode of deleting early is exactly the silent one this repository keeps re-learning.
+
+
+## The environment needs live credentials, not a static key
+
+A development environment that cannot deploy is a notebook. This one can clone, edit, run and push, but
+it cannot touch the tenant it is building **for**: a Worker it writes is a directory of files until
+something can run `wrangler deploy`, create an R2 bucket, read a secret or set an environment variable.
+Everything the agency is asked to build lands in the Alphaville tenancy, so the environment needs
+working access to that tenancy — a `CLOUDFLARE_API_TOKEN` with the scopes the work needs, the account
+id, and a route to Secrets Store.
+
+**"Live, not static" is the requirement, and it changes the design.** A token pasted into a Worker
+secret is a credential with no owner, no expiry that anyone observes, and no way to revoke one consumer
+without revoking all of them. What this needs instead is provisioning at the point of use:
+
+- **Short-lived and scoped to the work.** Mint or exchange a credential per task, with the scopes that
+  task needs, expiring on its own.
+- **A broker, not a copy.** The environment asks for what it needs; the broker decides. This is already
+  the agency's own build order step 3 — *"AgentMail plus a narrow secret-broker Worker"* — so the
+  requirement is not a new workstream, it is that step arriving early because everything before it is
+  blocked on it.
+- **Rotatable without a rebuild.** Whatever holds the credential must be swappable without an image
+  build, which is the same rule as the volume: configuration changes are runtime, not build-time.
+
+**This is a request, not something to self-provision.** The project's rule is explicit: anything that
+widens what an agent can reach — a key, a credential, an account, a secret, a deployment target — is
+requested from the operator, never minted by the agent, because "a credential an agent minted is one it
+can silently spend against". The environment's own build order says the same thing.
+
+**Ask:** a `CLOUDFLARE_API_TOKEN` for the Alphaville account (`ed5246…`) carrying `workers_scripts`,
+`workers_routes`, `workers_kv`, R2, Durable Objects and Secrets Store as the work requires, delivered
+so it can be rotated without redeploying the image — and, as the broker lands, replaced by per-task
+short-lived credentials rather than one long-lived one.
